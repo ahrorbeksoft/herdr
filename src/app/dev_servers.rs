@@ -99,6 +99,14 @@ pub(crate) fn dev_server_entries(
         if !owner_root.contains_key(&listener.pid) {
             continue;
         }
+        // Herdr's own processes (the stable server or a `herdr-dev` build run
+        // inside a pane) are infrastructure, not dev servers.
+        if by_pid
+            .get(&listener.pid)
+            .is_some_and(|process| matches!(process.name.as_str(), "herdr" | "herdr-dev"))
+        {
+            continue;
+        }
         listeners_by_pid
             .entry(listener.pid)
             .or_default()
@@ -274,6 +282,28 @@ mod tests {
                 port: 3000,
             }]
         );
+    }
+
+    #[test]
+    fn dev_servers_hide_herdr_processes() {
+        // A `cargo run` herdr or herdr-dev server inside a pane is herdr
+        // infrastructure, not a dev server.
+        let processes = vec![
+            process(100, 1, "zsh"),
+            process(200, 100, "herdr"),
+            process(201, 100, "herdr-dev"),
+            process(202, 100, "node"),
+        ];
+        let listeners = vec![
+            listener(200, "127.0.0.1", 4000),
+            listener(201, "127.0.0.1", 4001),
+            listener(202, "127.0.0.1", 4002),
+        ];
+        let roots = vec![root(100, "w1:p1", "w1")];
+
+        let servers = dev_server_entries(&processes, &listeners, &roots, |_| None);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].pid, 202);
     }
 
     #[test]
