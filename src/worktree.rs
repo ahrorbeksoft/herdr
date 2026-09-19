@@ -203,7 +203,6 @@ pub(crate) fn is_not_working_tree_remove_error(message: &str) -> bool {
     lower.contains("is not a working tree") || lower.contains("is not a worktree")
 }
 
-#[cfg(windows)]
 pub(crate) fn worktree_dirty_remove_message(path: &Path) -> String {
     format!(
         "fatal: '{}' contains modified or untracked files, use --force to delete it",
@@ -211,7 +210,6 @@ pub(crate) fn worktree_dirty_remove_message(path: &Path) -> String {
     )
 }
 
-#[cfg(any(windows, test))]
 pub(crate) fn checkout_has_dirty_files(
     path: &Path,
     trust_repository: bool,
@@ -522,6 +520,336 @@ fn worktree_list_contains_path(
     Ok(list_existing_worktrees(repo_root, trust_repository)?
         .into_iter()
         .any(|entry| canonical_or_original(&entry.path) == expected))
+}
+
+// ---- cow backend ----
+
+/// Selects the checkout provider behind Herdr's worktree actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorktreeBackend {
+    Git,
+    Cow,
+}
+
+impl WorktreeBackend {
+    pub(crate) fn from_config(value: &str) -> Self {
+        match value.trim() {
+            "cow" => Self::Cow,
+            _ => Self::Git,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CowPasture {
+    pub name: String,
+    pub path: PathBuf,
+    pub source: PathBuf,
+    pub branch: Option<String>,
+    pub dirty: bool,
+}
+
+/// Default root cow uses for pastures; overridable for tests via env.
+pub(crate) fn cow_pastures_directory() -> PathBuf {
+    let dir = std::env::var("HERDR_COW_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "~/.cow/pastures".to_string());
+    expand_tilde_absolute_path(&dir)
+}
+
+/// Resolves the `cow` executable: `HERDR_COW_BIN`, then `$PATH`, then the
+/// usual install locations. The daemon's PATH is minimal, so Homebrew and
+/// cargo bin dirs are probed explicitly even when absent from PATH.
+fn cow_program() -> PathBuf {
+    if let Some(custom) = std::env::var("HERDR_COW_BIN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return PathBuf::from(custom);
+    }
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    for extra in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "~/.cargo/bin",
+        "~/.local/bin",
+    ] {
+        let dir = expand_tilde_absolute_path(extra);
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs.iter()
+        .map(|dir| dir.join("cow"))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from("cow"))
+}
+
+fn cow_command() -> std::process::Command {
+    crate::noninteractive_process::command(cow_program())
+}
+
+#[derive(serde::Deserialize)]
+struct CowListEntry {
+    name: String,
+    path: PathBuf,
+    source: PathBuf,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    current_branch: Option<String>,
+    #[serde(default)]
+    dirty: bool,
+}
+
+/// `cow list --json`, optionally scoped to one source repository.
+/// Callers that probe pasture membership (e.g. [`cow_pasture_source`])
+/// treat an error as "no pastures".
+pub(crate) fn list_cow_pastures(source: Option<&Path>) -> Result<Vec<CowPasture>, String> {
+    let mut command = cow_command();
+    command.args(["list", "--json"]);
+    if let Some(source) = source {
+        command.arg("--source").arg(source);
+    }
+    let output = command
+        .output()
+        .map_err(|err| format!("failed to run {}: {err}", cow_program().display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("cow list failed with status {}", output.status)
+        } else {
+            stderr
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let entries: Vec<CowListEntry> = serde_json::from_str(&stdout)
+        .map_err(|err| format!("cow list JSON parse failed: {err}"))?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| CowPasture {
+            name: entry.name,
+            path: entry.path,
+            source: entry.source,
+            branch: entry.current_branch.or(entry.branch),
+            dirty: entry.dirty,
+        })
+        .collect())
+}
+
+/// The source repository of the pasture rooted at `repo_root`, if it is one.
+pub(crate) fn cow_pasture_source(repo_root: &Path) -> Option<PathBuf> {
+    let expected = canonical_or_original(repo_root);
+    list_cow_pastures(None)
+        .ok()?
+        .into_iter()
+        .find_map(|pasture| {
+            (canonical_or_original(&pasture.path) == expected)
+                .then(|| canonical_or_original(&pasture.source))
+        })
+}
+
+/// `git worktree list` or `cow list`, presented as worktree entries.
+/// The cow listing prepends the source checkout itself, mirroring how
+/// `git worktree list` includes the main worktree.
+pub(crate) fn list_worktrees(
+    backend: WorktreeBackend,
+    repo_root: &Path,
+    trust_repository: bool,
+) -> Result<Vec<ExistingWorktree>, String> {
+    match backend {
+        WorktreeBackend::Git => list_existing_worktrees(repo_root, trust_repository),
+        WorktreeBackend::Cow => {
+            let mut entries = Vec::new();
+            let branch = crate::workspace::git_branch(repo_root);
+            entries.push(ExistingWorktree {
+                path: repo_root.to_path_buf(),
+                is_detached: branch.is_none(),
+                branch,
+                is_bare: false,
+                is_prunable: false,
+            });
+            for pasture in list_cow_pastures(Some(repo_root))? {
+                entries.push(ExistingWorktree {
+                    path: pasture.path,
+                    is_detached: pasture.branch.is_none(),
+                    branch: pasture.branch,
+                    is_bare: false,
+                    is_prunable: false,
+                });
+            }
+            Ok(entries)
+        }
+    }
+}
+
+/// Creates a checkout: `git worktree add` or `cow create`.
+/// Returns the checkout path, which cow decides itself (`--print-path`).
+pub(crate) fn run_worktree_add(
+    backend: WorktreeBackend,
+    repo_root: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+    trust_repository: bool,
+) -> Result<PathBuf, String> {
+    match backend {
+        WorktreeBackend::Git => {
+            run_worktree_add_command(repo_root, path, branch, base, trust_repository)?;
+            Ok(path.to_path_buf())
+        }
+        WorktreeBackend::Cow => run_cow_create(repo_root, branch),
+    }
+}
+
+fn run_cow_create(repo_root: &Path, branch: &str) -> Result<PathBuf, String> {
+    let name = branch_to_path_slug(branch);
+    let output = cow_command()
+        .env("LC_ALL", "C")
+        .arg("create")
+        .arg("--source")
+        .arg(repo_root)
+        .arg("--branch")
+        .arg(branch)
+        .arg("--print-path")
+        .arg(&name)
+        .output()
+        .map_err(|err| format!("failed to run {}: {err}", cow_program().display()))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() {
+        return Err(if stderr.is_empty() {
+            format!("cow create failed with status {}", output.status)
+        } else {
+            stderr
+        });
+    }
+    if stdout.is_empty() {
+        return Err("cow create did not report a pasture path".to_string());
+    }
+    Ok(PathBuf::from(stdout))
+}
+
+/// `cow remove` needs the pasture name, which is resolved from the
+/// checkout path via `cow list` (falling back to the <repo>/<name> tail).
+pub(crate) fn build_cow_remove_command(path: &Path, force: bool) -> WorktreeCommand {
+    let expected = canonical_or_original(path);
+    let name = list_cow_pastures(None)
+        .ok()
+        .and_then(|pastures| {
+            pastures
+                .into_iter()
+                .find(|pasture| canonical_or_original(&pasture.path) == expected)
+                .map(|pasture| pasture.name)
+        })
+        .unwrap_or_else(|| {
+            let tail: Vec<String> = path
+                .components()
+                .rev()
+                .take(2)
+                .filter_map(|part| part.as_os_str().to_str().map(str::to_string))
+                .collect();
+            if tail.len() == 2 {
+                format!("{}/{}", tail[1], tail[0])
+            } else {
+                path.display().to_string()
+            }
+        });
+    let mut args = vec!["remove".to_string(), name, "-y".to_string()];
+    if force {
+        args.push("--force".to_string());
+    }
+    WorktreeCommand {
+        program: cow_program().to_string_lossy().into_owned(),
+        args,
+    }
+}
+
+/// Serializes tests that mutate the cow-related process env, which is
+/// shared by every test thread in the crate.
+#[cfg(test)]
+pub(crate) static COW_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Restores mutated env vars on drop; pair with [`COW_ENV_LOCK`].
+#[cfg(test)]
+pub(crate) struct CowEnvGuard {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+#[cfg(test)]
+impl CowEnvGuard {
+    pub(crate) fn set(vars: &[(&'static str, Option<&Path>)]) -> Self {
+        let saved = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        Self { saved }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CowEnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in &self.saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+/// Writes an executable fake `cow` that logs its argv to `cow-stub.log`,
+/// serves canned `list --json` output, and answers
+/// `create ... --print-path <name>` with a pasture path under `dir`.
+#[cfg(all(test, unix))]
+pub(crate) fn write_cow_stub(dir: &Path, list_json: &str) -> PathBuf {
+    let script = dir.join("cow-stub.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             echo \"$@\" >> '{log}'\n\
+             case \"$1\" in\n\
+             list)\n\
+             cat <<'HERDR_COW_STUB_JSON'\n\
+             {list_json}\n\
+             HERDR_COW_STUB_JSON\n\
+             ;;\n\
+             create)\n\
+             shift\n\
+             while [ $# -gt 0 ]; do\n\
+             case \"$1\" in\n\
+             --source|--branch) shift 2 ;;\n\
+             --print-path) shift ;;\n\
+             *) name=\"$1\"; shift ;;\n\
+             esac\n\
+             done\n\
+             mkdir -p '{dir}/pastures'\n\
+             echo '{dir}/pastures/'\"$name\"\n\
+             ;;\n\
+             esac\n",
+            log = dir.join("cow-stub.log").display(),
+            list_json = list_json,
+            dir = dir.display(),
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).unwrap();
+    script
 }
 
 #[cfg(test)]
@@ -1019,5 +1347,230 @@ prunable stale
         assert!(checkout.join("unrelated").exists());
         let _ = std::fs::remove_dir_all(checkout);
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    // ---- cow backend ----
+
+    #[test]
+    fn worktree_backend_from_config_selects_cow_only() {
+        assert_eq!(WorktreeBackend::from_config("cow"), WorktreeBackend::Cow);
+        assert_eq!(WorktreeBackend::from_config(" cow "), WorktreeBackend::Cow);
+        assert_eq!(WorktreeBackend::from_config("git"), WorktreeBackend::Git);
+        assert_eq!(WorktreeBackend::from_config(""), WorktreeBackend::Git);
+        assert_eq!(
+            WorktreeBackend::from_config("something-else"),
+            WorktreeBackend::Git
+        );
+    }
+
+    #[test]
+    fn cow_pastures_directory_prefers_env_override() {
+        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let dir = unique_temp_path("cow-dir-override");
+        let _env = CowEnvGuard::set(&[("HERDR_COW_DIR", Some(&dir))]);
+        assert_eq!(cow_pastures_directory(), dir);
+    }
+
+    #[test]
+    fn cow_program_prefers_env_override() {
+        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let _env = CowEnvGuard::set(&[("HERDR_COW_BIN", Some(Path::new("/custom/cow")))]);
+        assert_eq!(cow_program(), Path::new("/custom/cow"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cow_program_searches_path_dirs() {
+        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let dir = unique_temp_path("cow-program-path");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cow"), "").unwrap();
+        // Keep system dirs so parallel tests can still spawn git/sh.
+        let path = format!("{}:/usr/bin:/bin", dir.display());
+        let _env = CowEnvGuard::set(&[
+            ("HERDR_COW_BIN", Some(Path::new("  "))),
+            ("PATH", Some(Path::new(&path))),
+        ]);
+
+        assert_eq!(cow_program(), dir.join("cow"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cow_list_parses_pasture_entries() {
+        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let dir = unique_temp_path("cow-list-entries");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pasture = dir.join("pastures/repo/feat");
+        let source = dir.join("src/repo");
+        let stub = write_cow_stub(
+            &dir,
+            &format!(
+                "[{{\"name\":\"repo/feat\",\"path\":\"{}\",\"source\":\"{}\",\"current_branch\":\"feat\",\"dirty\":true,\"is_worktree\":false}},\
+                 {{\"name\":\"repo/det\",\"path\":\"{}\",\"source\":\"{}\",\"branch\":\"det\",\"dirty\":false}}]",
+                pasture.display(),
+                source.display(),
+                dir.join("pastures/repo/det").display(),
+                source.display(),
+            ),
+        );
+        let _env = CowEnvGuard::set(&[("HERDR_COW_BIN", Some(&stub))]);
+
+        let pastures = list_cow_pastures(None).unwrap();
+
+        assert_eq!(
+            pastures,
+            vec![
+                CowPasture {
+                    name: "repo/feat".into(),
+                    path: pasture.clone(),
+                    source: source.clone(),
+                    branch: Some("feat".into()),
+                    dirty: true,
+                },
+                CowPasture {
+                    name: "repo/det".into(),
+                    path: dir.join("pastures/repo/det"),
+                    source: source.clone(),
+                    branch: Some("det".into()),
+                    dirty: false,
+                },
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cow_pasture_source_maps_listed_pasture_to_source() {
+        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let dir = unique_temp_path("cow-pasture-source");
+        let pasture = create_committed_repo("cow-pasture-source-pasture");
+        let source = create_committed_repo("cow-pasture-source-src");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = write_cow_stub(
+            &dir,
+            &format!(
+                "[{{\"name\":\"src/pasture\",\"path\":\"{}\",\"source\":\"{}\",\"current_branch\":\"feat\",\"dirty\":false}}]",
+                pasture.display(),
+                source.display(),
+            ),
+        );
+        let _env = CowEnvGuard::set(&[("HERDR_COW_BIN", Some(&stub))]);
+
+        assert_eq!(
+            cow_pasture_source(&pasture),
+            Some(canonical_or_original(&source))
+        );
+        assert_eq!(cow_pasture_source(&source), None);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&pasture);
+        let _ = std::fs::remove_dir_all(&source);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_worktrees_cow_includes_source_then_pastures() {
+        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let dir = unique_temp_path("cow-list-worktrees");
+        let repo = create_committed_repo("cow-list-worktrees-repo");
+        let pasture = dir.join("pastures/repo/feat");
+        std::fs::create_dir_all(&pasture).unwrap();
+        let stub = write_cow_stub(
+            &dir,
+            &format!(
+                "[{{\"name\":\"repo/feat\",\"path\":\"{}\",\"source\":\"{}\",\"current_branch\":\"feat\",\"dirty\":false}}]",
+                pasture.display(),
+                repo.display(),
+            ),
+        );
+        let _env = CowEnvGuard::set(&[("HERDR_COW_BIN", Some(&stub))]);
+
+        let entries = list_worktrees(WorktreeBackend::Cow, &repo, false).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, repo);
+        assert!(entries[0].branch.is_some());
+        assert!(!entries[0].is_detached);
+        assert_eq!(entries[1].path, pasture);
+        assert_eq!(entries[1].branch.as_deref(), Some("feat"));
+        let log = std::fs::read_to_string(dir.join("cow-stub.log")).unwrap();
+        assert!(
+            log.contains(&format!("--source {}", repo.display())),
+            "expected cow list scoped to the source repo, got: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_worktree_add_cow_returns_reported_path() {
+        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let dir = unique_temp_path("cow-add");
+        let repo = create_committed_repo("cow-add-repo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = write_cow_stub(&dir, "[]");
+        let _env = CowEnvGuard::set(&[("HERDR_COW_BIN", Some(&stub))]);
+
+        let created = run_worktree_add(
+            WorktreeBackend::Cow,
+            &repo,
+            &dir.join("ignored-git-path"),
+            "feature/thing",
+            "HEAD",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(created, dir.join("pastures/feature-thing"));
+        let log = std::fs::read_to_string(dir.join("cow-stub.log")).unwrap();
+        assert!(
+            log.contains(&format!(
+                "create --source {} --branch feature/thing --print-path feature-thing",
+                repo.display()
+            )),
+            "unexpected cow create invocation: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cow_remove_command_prefers_listed_pasture_name() {
+        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let dir = unique_temp_path("cow-remove-listed");
+        let pasture = dir.join("pastures/repo/feat");
+        std::fs::create_dir_all(&pasture).unwrap();
+        let stub = write_cow_stub(
+            &dir,
+            &format!(
+                "[{{\"name\":\"custom/pasture-name\",\"path\":\"{}\",\"source\":\"/src/repo\",\"current_branch\":\"feat\",\"dirty\":false}}]",
+                pasture.display(),
+            ),
+        );
+        let _env = CowEnvGuard::set(&[("HERDR_COW_BIN", Some(&stub))]);
+
+        let command = build_cow_remove_command(&pasture, true);
+
+        assert_eq!(command.program, stub.display().to_string());
+        assert_eq!(
+            command.args,
+            vec!["remove", "custom/pasture-name", "-y", "--force"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cow_remove_command_falls_back_to_path_tail() {
+        let _lock = COW_ENV_LOCK.lock().unwrap();
+        // No listed pasture matches: the name is derived from the
+        // <repo>/<name> tail of the checkout path. Works whether or not a
+        // real cow binary is installed, since this path cannot be listed.
+        let command = build_cow_remove_command(Path::new("/pastures/repo/feat"), false);
+
+        assert_eq!(command.args, vec!["remove", "repo/feat", "-y"]);
     }
 }

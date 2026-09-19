@@ -100,9 +100,12 @@ Set the root directory Herdr uses for Git worktree checkouts created from the si
 ```toml
 [worktrees]
 directory = "~/.herdr/worktrees"
+backend = "git"
 ```
 
 Herdr creates checkouts under `<directory>/<repo>/<branch-slug>`. For sibling-style checkouts, set this to a directory such as `~/Projects/herdr-worktrees`. Relative values are resolved to an absolute path when the app applies the config.
+
+Set `backend` to `"cow"` to create [cow](https://github.com/joeinnes/cow) APFS pastures instead of linked Git worktrees (macOS only, requires the `cow` CLI). Pastures are created under `~/.cow/pastures/<repo>/<branch-slug>` — the `directory` option and custom checkout paths do not apply — and are removed with `cow remove`.
 
 Worktree actions are available from Git workspace rows. `New worktree` creates a checkout. It checks out an existing local branch when the entered branch exists; otherwise, it creates the branch. It then opens the checkout as a new Herdr workspace and groups it under the source workspace. `Open worktree...` lists existing Git worktree checkouts for that repo. Choosing an already-open checkout focuses it, while choosing a closed checkout opens it in the same group.
 

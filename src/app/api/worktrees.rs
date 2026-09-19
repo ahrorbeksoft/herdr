@@ -58,7 +58,8 @@ impl App {
             Ok(source) => source,
             Err(err) => return encode_error(id, err.code, err.message),
         };
-        let entries = match crate::worktree::list_existing_worktrees(
+        let entries = match crate::worktree::list_worktrees(
+            self.state.worktree_backend,
             &source.source_repo_root,
             params.trust_repository,
         ) {
@@ -213,7 +214,9 @@ impl App {
                     "Herdr worktree actions require a path inside a Git work tree",
                 )
             })?;
-            if space.is_linked_worktree {
+            if space.is_linked_worktree
+                || cow_pasture_source_space(&space, self.state.worktree_backend).is_some()
+            {
                 return Err(ApiFailure::new(
                     "linked_worktree_source",
                     "New and open worktree actions start from the repo parent workspace.",
@@ -274,12 +277,17 @@ impl App {
                     "Herdr worktree actions require a path inside a Git work tree",
                 )
             })?;
-            let workspace_idx = self.list_source_workspace_idx_for_space(&space, trust_repository);
+            let workspace_idx = self.list_source_workspace_idx_for_space(
+                &space,
+                trust_repository,
+                self.state.worktree_backend,
+            );
             return Ok(worktree_source_from_space(
                 space,
                 workspace_idx,
                 true,
                 trust_repository,
+                self.state.worktree_backend,
             ));
         }
 
@@ -331,7 +339,9 @@ impl App {
                 "Herdr worktree actions require a workspace inside a Git work tree",
             ));
         };
-        if space.is_linked_worktree {
+        if space.is_linked_worktree
+            || cow_pasture_source_space(&space, self.state.worktree_backend).is_some()
+        {
             return Err(ApiFailure::new(
                 "linked_worktree_source",
                 "New and open worktree actions start from the repo parent workspace.",
@@ -388,8 +398,14 @@ impl App {
                 "Herdr worktree actions require a workspace inside a Git work tree",
             ));
         };
-        let workspace_idx = if space.is_linked_worktree {
-            self.list_source_workspace_idx_for_space(&space, trust_repository)
+        let secondary_checkout = space.is_linked_worktree
+            || cow_pasture_source_space(&space, self.state.worktree_backend).is_some();
+        let workspace_idx = if secondary_checkout {
+            self.list_source_workspace_idx_for_space(
+                &space,
+                trust_repository,
+                self.state.worktree_backend,
+            )
         } else {
             Some(ws_idx)
         };
@@ -398,6 +414,7 @@ impl App {
             workspace_idx,
             true,
             trust_repository,
+            self.state.worktree_backend,
         ))
     }
 
@@ -440,10 +457,13 @@ impl App {
         &self,
         space: &crate::workspace::GitSpaceMetadata,
         trust_repository: bool,
+        backend: crate::worktree::WorktreeBackend,
     ) -> Option<usize> {
         if space.is_linked_worktree {
-            let parent_checkout = parent_checkout_path_for_space(space, trust_repository);
+            let parent_checkout = parent_checkout_path_for_space(space, trust_repository, backend);
             self.open_workspace_idx_for_checkout(&parent_checkout)
+        } else if let Some(source_space) = cow_pasture_source_space(space, backend) {
+            self.find_parent_workspace_for_space(&source_space)
         } else {
             self.find_parent_workspace_for_space(space)
         }
@@ -502,9 +522,12 @@ impl App {
         branch: Option<String>,
         trust_repository: bool,
     ) -> Result<crate::worktree::ExistingWorktree, ApiFailure> {
-        let entries =
-            crate::worktree::list_existing_worktrees(&source.source_repo_root, trust_repository)
-                .map_err(|err| ApiFailure::new("worktree_list_failed", err))?;
+        let entries = crate::worktree::list_worktrees(
+            self.state.worktree_backend,
+            &source.source_repo_root,
+            trust_repository,
+        )
+        .map_err(|err| ApiFailure::new("worktree_list_failed", err))?;
         if let Some(path) = path {
             let expected = absolute_user_path(&path)?;
             let expected = crate::worktree::canonical_or_original(&expected);
@@ -682,31 +705,65 @@ impl App {
     }
 }
 
+/// When `space` is a cow pasture, the Git space of its source repository.
+/// Pastures are standalone repos, so unlike linked worktrees they carry no
+/// parent pointer in `.git` — cow's pasture list provides the mapping.
+fn cow_pasture_source_space(
+    space: &crate::workspace::GitSpaceMetadata,
+    backend: crate::worktree::WorktreeBackend,
+) -> Option<crate::workspace::GitSpaceMetadata> {
+    if backend != crate::worktree::WorktreeBackend::Cow || space.is_linked_worktree {
+        return None;
+    }
+    let source = crate::worktree::cow_pasture_source(&space.repo_root)?;
+    crate::workspace::git_space_metadata(&source)
+}
+
 fn worktree_source_from_space(
     space: crate::workspace::GitSpaceMetadata,
     workspace_idx: Option<usize>,
     allow_linked: bool,
     trust_repository: bool,
+    backend: crate::worktree::WorktreeBackend,
 ) -> WorktreeSource {
     let source_checkout_path = if allow_linked {
-        parent_checkout_path_for_space(&space, trust_repository)
+        parent_checkout_path_for_space(&space, trust_repository, backend)
     } else {
         space.repo_root.clone()
+    };
+    // A secondary checkout (linked worktree or cow pasture) resolves to a
+    // different repo: take the parent repo's identity for grouping. For
+    // linked worktrees this is a no-op — they already share the parent key.
+    let (repo_key, repo_name) = if crate::worktree::canonical_or_original(&source_checkout_path)
+        != crate::worktree::canonical_or_original(&space.repo_root)
+    {
+        match crate::workspace::git_space_metadata(&source_checkout_path) {
+            Some(source_space) => (source_space.key, source_space.repo_name),
+            None => (space.key, space.repo_name),
+        }
+    } else {
+        (space.key, space.repo_name)
     };
     WorktreeSource {
         workspace_idx,
         source_checkout_path: source_checkout_path.clone(),
         source_repo_root: source_checkout_path,
-        repo_key: space.key,
-        repo_name: space.repo_name,
+        repo_key,
+        repo_name,
     }
 }
 
 fn parent_checkout_path_for_space(
     space: &crate::workspace::GitSpaceMetadata,
     trust_repository: bool,
+    backend: crate::worktree::WorktreeBackend,
 ) -> PathBuf {
     if !space.is_linked_worktree {
+        if backend == crate::worktree::WorktreeBackend::Cow {
+            if let Some(source) = crate::worktree::cow_pasture_source(&space.repo_root) {
+                return source;
+            }
+        }
         return space.repo_root.clone();
     }
 
@@ -2491,5 +2548,176 @@ mod tests {
             app.state.terminals[&child_terminal_id].cwd,
             PathBuf::from("/repo/other")
         );
+    }
+
+    // ---- cow backend ----
+
+    #[test]
+    fn deferred_api_worktree_create_cow_rejects_custom_path() {
+        let repo = create_committed_repo("api-worktree-create-cow-path-repo");
+        let mut app = app_with_parent(&repo);
+        app.state.worktree_backend = crate::worktree::WorktreeBackend::Cow;
+        let (respond_to, response_rx) = response_channel();
+
+        assert!(app.handle_deferred_worktree_api_request(
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeCreate(WorktreeCreateParams {
+                    branch: Some("feature/cow".into()),
+                    path: Some("/tmp/custom-checkout".into()),
+                    ..WorktreeCreateParams::default()
+                }),
+            },
+            respond_to,
+        ));
+
+        let response = response_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("cow custom path should be rejected immediately");
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_request");
+        assert!(error.error.message.contains("cow backend"));
+        assert!(app.pending_api_worktree_creates.is_empty());
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn deferred_api_worktree_remove_cow_dirty_requires_force() {
+        let repo = create_committed_repo("api-worktree-remove-cow-dirty-repo");
+        let checkout = create_committed_repo("api-worktree-remove-cow-dirty-checkout");
+        std::fs::write(checkout.join("untracked.txt"), "dirty\n").unwrap();
+
+        let mut app = test_app();
+        app.state.worktree_backend = crate::worktree::WorktreeBackend::Cow;
+        let mut child = Workspace::test_new("child");
+        child.identity_cwd = checkout.clone();
+        child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: crate::workspace::git_space_metadata(&repo).unwrap().key,
+            label: "api-worktree-remove-cow-dirty-repo".into(),
+            repo_root: repo.clone(),
+            checkout_path: checkout.clone(),
+            is_linked_worktree: true,
+        });
+        let child_id = child.id.clone();
+        app.state.workspaces.push(child);
+        app.state.ensure_test_terminals();
+        let (respond_to, response_rx) = response_channel();
+
+        assert!(app.handle_deferred_worktree_api_request(
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeRemove(WorktreeRemoveParams {
+                    workspace_id: child_id,
+                    force: false,
+                    trust_repository: false,
+                }),
+            },
+            respond_to,
+        ));
+
+        let response = response_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("dirty cow pasture should require force");
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "dirty_worktree_requires_force");
+        assert!(app.pending_api_worktree_removes.is_empty());
+        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(checkout);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_worktree_list_cow_maps_pasture_to_source_repo() {
+        let _lock = crate::worktree::COW_ENV_LOCK.lock().unwrap();
+        let stub_dir = unique_temp_path("api-worktree-list-cow-stub");
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        let repo = create_committed_repo("api-worktree-list-cow-repo");
+        let pasture = create_committed_repo("api-worktree-list-cow-pasture");
+        let stub = crate::worktree::write_cow_stub(
+            &stub_dir,
+            &format!(
+                "[{{\"name\":\"repo/pasture\",\"path\":\"{}\",\"source\":\"{}\",\"current_branch\":\"feature/cow\",\"dirty\":false}}]",
+                pasture.display(),
+                repo.display(),
+            ),
+        );
+        let _env = crate::worktree::CowEnvGuard::set(&[("HERDR_COW_BIN", Some(&stub))]);
+        let mut app = test_app();
+        app.state.worktree_backend = crate::worktree::WorktreeBackend::Cow;
+
+        // Listing from inside a pasture resolves to the source repo and
+        // lists its pastures, mirroring linked-worktree behaviour.
+        let response = app.handle_api_request(Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::WorktreeList(WorktreeListParams {
+                workspace_id: None,
+                cwd: Some(pasture.display().to_string()),
+                trust_repository: false,
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeList { source, worktrees } = success.result else {
+            panic!("expected worktree_list response");
+        };
+        assert_eq!(
+            crate::worktree::canonical_or_original(std::path::Path::new(&source.repo_root)),
+            crate::worktree::canonical_or_original(&repo)
+        );
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(
+            crate::worktree::canonical_or_original(std::path::Path::new(&worktrees[0].path)),
+            crate::worktree::canonical_or_original(&repo)
+        );
+        assert!(!worktrees[0].is_linked_worktree);
+        assert_eq!(
+            crate::worktree::canonical_or_original(std::path::Path::new(&worktrees[1].path)),
+            crate::worktree::canonical_or_original(&pasture)
+        );
+        assert!(worktrees[1].is_linked_worktree);
+        assert_eq!(worktrees[1].branch.as_deref(), Some("feature/cow"));
+        let _ = std::fs::remove_dir_all(stub_dir);
+        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(pasture);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_worktree_source_cow_rejects_pasture_checkout() {
+        let _lock = crate::worktree::COW_ENV_LOCK.lock().unwrap();
+        let stub_dir = unique_temp_path("api-worktree-source-cow-stub");
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        let repo = create_committed_repo("api-worktree-source-cow-repo");
+        let pasture = create_committed_repo("api-worktree-source-cow-pasture");
+        let stub = crate::worktree::write_cow_stub(
+            &stub_dir,
+            &format!(
+                "[{{\"name\":\"repo/pasture\",\"path\":\"{}\",\"source\":\"{}\",\"current_branch\":\"feature/cow\",\"dirty\":false}}]",
+                pasture.display(),
+                repo.display(),
+            ),
+        );
+        let _env = crate::worktree::CowEnvGuard::set(&[("HERDR_COW_BIN", Some(&stub))]);
+        let mut app = test_app();
+        app.state.worktree_backend = crate::worktree::WorktreeBackend::Cow;
+
+        // New/open actions from inside a pasture start from the source
+        // repo workspace, same as linked worktrees.
+        let response = app.handle_api_request(Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::WorktreeOpen(
+                crate::api::schema::WorktreeOpenParams {
+                    cwd: Some(pasture.display().to_string()),
+                    branch: Some("feature/other".into()),
+                    ..Default::default()
+                },
+            ),
+        });
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "linked_worktree_source");
+        let _ = std::fs::remove_dir_all(stub_dir);
+        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(pasture);
     }
 }

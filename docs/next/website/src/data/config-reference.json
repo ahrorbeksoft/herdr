@@ -1435,6 +1435,12 @@
           "type": "string",
           "default": "\"~/.herdr/worktrees\"",
           "description": "Root directory under which Herdr creates <repo>/<branch-slug> checkouts."
+        },
+        {
+          "key": "worktrees.backend",
+          "type": "string",
+          "default": "\"git\"",
+          "description": "Checkout provider behind worktree actions: \"git\" uses git worktree, \"cow\" uses cow APFS pastures (macOS, requires the cow CLI)."
         }
       ]
     },

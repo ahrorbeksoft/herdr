@@ -834,6 +834,8 @@ pub struct IndexedKeysConfig {
 pub struct WorktreesConfig {
     /// Root directory under which Herdr creates <repo>/<branch-slug> checkouts.
     pub directory: String,
+    /// Checkout provider behind worktree actions: "git" or "cow".
+    pub backend: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -1151,6 +1153,7 @@ impl Default for WorktreesConfig {
     fn default() -> Self {
         Self {
             directory: "~/.herdr/worktrees".into(),
+            backend: "git".into(),
         }
     }
 }
@@ -1533,6 +1536,19 @@ directory = "~/Projects/herdr-worktrees"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.worktrees.directory, "~/Projects/herdr-worktrees");
+    }
+
+    #[test]
+    fn worktrees_backend_defaults_to_git_and_parses() {
+        let default_config = Config::default();
+        assert_eq!(default_config.worktrees.backend, "git");
+
+        let toml = r#"
+[worktrees]
+backend = "cow"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.worktrees.backend, "cow");
     }
 
     #[test]

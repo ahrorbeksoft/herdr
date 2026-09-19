@@ -226,7 +226,14 @@ pub(super) fn snapshot(
         server_keybindings_toml: app.client_shell_keybindings_profile().map(str::to_owned),
         latest_release_notes_available: app.state.latest_release_notes_available,
         integration_updates_available: app.state.integration_updates_available(),
-        worktree_directory: app.state.worktree_directory.to_string_lossy().into_owned(),
+        worktree_directory: match app.state.worktree_backend {
+            crate::worktree::WorktreeBackend::Cow => crate::worktree::cow_pastures_directory()
+                .to_string_lossy()
+                .into_owned(),
+            crate::worktree::WorktreeBackend::Git => {
+                app.state.worktree_directory.to_string_lossy().into_owned()
+            }
+        },
         release_notes,
         focused_workspace_id,
         focused_tab_id,

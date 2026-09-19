@@ -123,6 +123,18 @@ impl App {
                 return;
             }
         };
+        let backend = self.state.worktree_backend;
+        if backend == crate::worktree::WorktreeBackend::Cow && params.path.is_some() {
+            Self::send_api_response(
+                respond_to,
+                encode_error(
+                    id,
+                    "invalid_request",
+                    "custom checkout paths are not supported with the cow backend",
+                ),
+            );
+            return;
+        }
         let checkout_path = match params.path {
             Some(path) => match absolute_user_path(&path) {
                 Ok(path) => path,
@@ -131,11 +143,16 @@ impl App {
                     return;
                 }
             },
-            None => crate::worktree::default_checkout_path(
-                &self.state.worktree_directory,
-                &source.repo_name,
-                &branch,
-            ),
+            None => match backend {
+                crate::worktree::WorktreeBackend::Cow => crate::worktree::cow_pastures_directory()
+                    .join(&source.repo_name)
+                    .join(crate::worktree::branch_to_path_slug(&branch)),
+                crate::worktree::WorktreeBackend::Git => crate::worktree::default_checkout_path(
+                    &self.state.worktree_directory,
+                    &source.repo_name,
+                    &branch,
+                ),
+            },
         };
         let checkout_key = crate::worktree::canonical_or_original(&checkout_path);
         if self
@@ -184,24 +201,33 @@ impl App {
             focus: params.focus,
             respond_to,
         };
-        let path = checkout_path;
+        let expected_path = checkout_path;
         let source_checkout_path = api_request.source_checkout_path.clone();
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = if let Some(parent_dir) = parent_dir {
-                std::fs::create_dir_all(&parent_dir).map_err(|err| err.to_string())
+            let result = if backend == crate::worktree::WorktreeBackend::Git {
+                if let Some(parent_dir) = parent_dir {
+                    std::fs::create_dir_all(&parent_dir).map_err(|err| err.to_string())
+                } else {
+                    Ok(())
+                }
             } else {
                 Ok(())
             }
             .and_then(|()| {
-                crate::worktree::run_worktree_add_command(
+                crate::worktree::run_worktree_add(
+                    backend,
                     &source_checkout_path,
-                    &path,
+                    &expected_path,
                     &branch,
                     &base,
                     params.trust_repository,
                 )
             });
+            let (path, result) = match result {
+                Ok(created_path) => (created_path, Ok(())),
+                Err(err) => (expected_path, Err(err)),
+            };
             let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(Box::new(
                 crate::events::WorktreeAddResult {
                     path,
@@ -257,25 +283,28 @@ impl App {
             return;
         }
 
-        #[cfg(windows)]
+        // Dirty checkouts need an explicit force. Windows always pre-checks
+        // because removal there cannot rely on git's own refusal; the cow
+        // backend does the same since `cow remove` warns differently.
+        let precheck_dirty =
+            cfg!(windows) || self.state.worktree_backend == crate::worktree::WorktreeBackend::Cow;
+        if precheck_dirty
+            && !params.force
+            && crate::worktree::checkout_has_dirty_files(
+                &space.checkout_path,
+                params.trust_repository,
+            )
+            .unwrap_or(false)
         {
-            if !params.force
-                && crate::worktree::checkout_has_dirty_files(
-                    &space.checkout_path,
-                    params.trust_repository,
-                )
-                .unwrap_or(false)
-            {
-                Self::send_api_response(
-                    respond_to,
-                    encode_error(
-                        id,
-                        "dirty_worktree_requires_force",
-                        crate::worktree::worktree_dirty_remove_message(&space.checkout_path),
-                    ),
-                );
-                return;
-            }
+            Self::send_api_response(
+                respond_to,
+                encode_error(
+                    id,
+                    "dirty_worktree_requires_force",
+                    crate::worktree::worktree_dirty_remove_message(&space.checkout_path),
+                ),
+            );
+            return;
         }
 
         let workspace_internal_id = self.state.workspaces[ws_idx].id.clone();
@@ -323,12 +352,20 @@ impl App {
             .insert(checkout_key.clone(), operation_id);
         let workspace_snapshot = self.workspace_info(ws_idx);
         let worktree = self.worktree_info_for_membership(&space, None);
-        let command = crate::worktree::build_worktree_remove_command(
-            &space.repo_root,
-            &space.checkout_path,
-            params.force,
-            params.trust_repository,
-        );
+        let backend = self.state.worktree_backend;
+        let command = match backend {
+            crate::worktree::WorktreeBackend::Cow => {
+                crate::worktree::build_cow_remove_command(&space.checkout_path, params.force)
+            }
+            crate::worktree::WorktreeBackend::Git => {
+                crate::worktree::build_worktree_remove_command(
+                    &space.repo_root,
+                    &space.checkout_path,
+                    params.force,
+                    params.trust_repository,
+                )
+            }
+        };
         let api_request = ApiWorktreeRemoveRequest {
             id,
             operation_id,
@@ -342,13 +379,20 @@ impl App {
         let trust_repository = params.trust_repository;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = crate::worktree::run_worktree_remove_command_with_recovery(
-                &command,
-                &repo_root,
-                &path,
-                force,
-                trust_repository,
-            );
+            let result = match backend {
+                crate::worktree::WorktreeBackend::Cow => {
+                    crate::worktree::run_worktree_command(&command)
+                }
+                crate::worktree::WorktreeBackend::Git => {
+                    crate::worktree::run_worktree_remove_command_with_recovery(
+                        &command,
+                        &repo_root,
+                        &path,
+                        force,
+                        trust_repository,
+                    )
+                }
+            };
             let _ = event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(Box::new(
                 crate::events::WorktreeRemoveResult {
                     workspace_id: workspace_internal_id,

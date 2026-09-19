@@ -413,6 +413,8 @@ impl App {
 
         let worktree_directory =
             crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
+        let worktree_backend =
+            crate::worktree::WorktreeBackend::from_config(&config.worktrees.backend);
 
         info!(
             pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes,
@@ -457,6 +459,7 @@ impl App {
             should_quit: false,
             request_client_config_reload: false,
             worktree_directory,
+            worktree_backend,
             latest_release_notes,
             product_announcement: startup_product_announcement.map(|announcement| {
                 state::ProductAnnouncementState {
@@ -934,6 +937,8 @@ impl App {
         if !invalid_section("worktrees") {
             self.state.worktree_directory =
                 crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
+            self.state.worktree_backend =
+                crate::worktree::WorktreeBackend::from_config(&config.worktrees.backend);
         }
 
         if !invalid_section("theme") {
