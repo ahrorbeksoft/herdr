@@ -8,7 +8,7 @@ If you are running *inside* a Herdr pane (the environment variable `HERDR_ENV=1`
 
 Herdr is a terminal workspace manager for AI coding agents. Like tmux, it is a multiplexer: a background server owns real terminal processes, and clients attach to render them. Panes keep running when the human detaches, closes the terminal, or disconnects SSH.
 
-Unlike tmux, Herdr is mouse-first and agent-aware. The whole UI is clickable — panes, tabs, workspaces, split borders, right-click menus. Herdr detects coding agents running inside panes and shows each one's state in a sidebar, so the human can see across all their projects which agent is `working`, which is `blocked` waiting for input, and which is `done`. A CLI and a local socket API let scripts and agents drive Herdr programmatically.
+Unlike tmux, Herdr is mouse-first and agent-aware. The whole UI is clickable — panes, tabs, workspaces, split borders, right-click menus. Herdr detects coding agents running inside panes and shows each one's state in a sidebar, so the human can see across all their projects which agent is `working`, which is `blocked` waiting for input, and which is `done`. A "dev servers" item in the global menu lists TCP listeners started inside panes and can terminate them. A CLI and a local socket API let scripts and agents drive Herdr programmatically.
 
 ## Concept model
 
@@ -16,6 +16,7 @@ Teach these in this order:
 
 - **Session** — a persistent background server namespace. Running `herdr` attaches to the default session. Named sessions (`herdr session attach work`) are fully separate runtime namespaces; most people only need the default.
 - **Workspace** — the project-level container. One per repo, task, or investigation. Owns tabs and panes. The sidebar rolls agent states up per workspace.
+- **Worktree** — an extra checkout attached to a workspace's repository. With `worktrees.backend = "cow"` on macOS, checkouts are APFS copy-on-write "pastures" under `~/.cow/pastures/<repo>/<branch-slug>`: full local clones that carry untracked files, `.env` files, and `node_modules`, so agents can install dependencies and run dev servers inside without touching the source checkout.
 - **Tab** — a layout inside a workspace, for separating views like `agents`, `logs`, `server`.
 - **Pane** — a real terminal. Splittable right or down. Survives client detach.
 - **Agent** — a process Herdr recognizes inside a pane. States: `working`, `blocked`, `done`, `idle`, `unknown`.
@@ -46,7 +47,7 @@ curl.exe -fsSLo install.cmd https://herdr.dev/install.cmd && install.cmd && del 
 herdr
 ```
 
-Homebrew, mise, and Nix installs, verification, and manual downloads: https://herdr.dev/docs/install/. Direct installs use the stable channel by default and update with `herdr update`; preview is opt-in. Package-manager installs update through that package manager. Check the version with `herdr --version`.
+Homebrew, mise, and Nix installs, verification, and manual downloads: https://herdr.dev/docs/install/. Direct installs use the stable channel by default and update with `herdr update`; preview is opt-in. Package-manager installs update through that package manager. Check the version with `herdr --version`. This fork disables self-update: `herdr update` refuses, and background version and agent-manifest checks default to off — update by rebuilding from source.
 
 ## First-run walkthrough
 
@@ -81,7 +82,7 @@ Once the human is set up, offer to install it for your coding agent so future se
 - Config file: `~/.config/herdr/config.toml` on Linux and macOS; `%APPDATA%\herdr\config.toml` on Windows. Herdr works without one.
 - Print the full default config: `herdr --default-config`.
 - Apply edits to a running server: `herdr server reload-config` (or the global menu → reload config).
-- Main areas: `[keys]` keybindings, `[theme]` themes, `[ui]` sidebar and UI behavior, `[terminal]` shell defaults, `[update]` channel.
+- Main areas: `[keys]` keybindings, `[theme]` themes (`name = "ghostty"` follows Ghostty's configured theme), `[ui]` sidebar and UI behavior, `[terminal]` shell defaults, `[update]` channel, `[worktrees]` checkout backend (`"git"` or `"cow"`).
 - Full reference: https://herdr.dev/docs/configuration/
 
 ## Diagnosis recipes

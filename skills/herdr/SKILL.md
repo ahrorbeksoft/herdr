@@ -201,6 +201,12 @@ Use `--format ansi` when colors and terminal styling are evidence. Otherwise use
 
 If a larger recent read still does not reveal the completed response, ask the agent to write it as Markdown in a temporary directory and reply only with the file path, then read that file on the same machine. Use this only as a fallback; do not request file output in the initial prompt.
 
+## Worktrees and dev servers
+
+Worktree actions use the configured checkout backend. With `worktrees.backend = "cow"` on macOS, new and opened worktrees are `cow` APFS pastures — full copy-on-write clones of the source checkout that carry untracked files, `.env` files, build caches, and `node_modules`, all local under `~/.cow/pastures/<repo>/<branch-slug>`. A pasture is a complete environment: install dependencies and run dev servers inside it without affecting the source checkout. Removal runs `cow remove`; `worktrees.directory` and custom checkout paths do not apply to this backend.
+
+Dev servers started inside panes are discoverable through the `server.dev_servers` socket method, which lists TCP listeners owned by pane process trees across connected machines, grouped by endpoint. The `process.kill` method terminates one of those pids — SIGTERM first, SIGKILL when it survives — and only accepts pids inside a pane's process tree. The TUI exposes the same list through the global menu's "dev servers" item.
+
 ## Safety and coordination rules
 
 - Use `--no-focus` for background work unless the user asked to switch context.
@@ -209,6 +215,7 @@ If a larger recent read still does not reveal the completed response, ask the ag
 - Do not close workspaces, tabs, panes, or sessions you did not create unless the user explicitly asked. `workspace close --group` closes the primary workspace and its linked worktree workspaces; never add it merely to bypass `workspace_group_close_required`.
 - Use `--trust-repository` only after the user has verified the repository. It grants per-request Git trust; it is not a routine retry for a failed worktree command.
 - Client and server versions can differ after an update. Check `herdr status` before relying on new server features. A missing method is not permission to stop or upgrade a server.
+- Self-update is disabled in this build: `herdr update` refuses, and background version and manifest checks default to off. Do not try to upgrade the binary; this fork is updated by rebuilding it.
 - Never run `herdr server stop` from an active session unless the user explicitly intends to stop the server and its pane processes.
 - Never kill the main Herdr process. Use named test sessions for experiments that need an isolated server.
 - CLI server errors are JSON on stderr with exit status 1. CLI syntax errors exit with status 2.

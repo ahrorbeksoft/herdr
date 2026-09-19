@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 const PENDING_RELEASE_NOTES_PATH: &str = "release-notes.json";
+const FORK_CHANGELOG: &str = include_str!("../FORK_CHANGELOG.md");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseNotes {
@@ -71,7 +72,31 @@ fn load_stored_from_path(path: &Path) -> Option<StoredReleaseNotes> {
 }
 
 pub fn load_latest() -> Option<ReleaseNotes> {
-    load_latest_from_path(&pending_path(), &crate::build_info::version())
+    fork_release_notes()
+        .or_else(|| load_latest_from_path(&pending_path(), &crate::build_info::version()))
+}
+
+#[cfg(not(test))]
+fn fork_release_notes() -> Option<ReleaseNotes> {
+    let body = fork_notes_body(FORK_CHANGELOG);
+    (!body.is_empty()).then(|| ReleaseNotes {
+        version: crate::build_info::version(),
+        body,
+        preview: false,
+    })
+}
+
+#[cfg(test)]
+fn fork_release_notes() -> Option<ReleaseNotes> {
+    None
+}
+
+fn fork_notes_body(content: &str) -> String {
+    let body = match content.split_once('\n') {
+        Some((title, rest)) if title.starts_with("# ") => rest,
+        _ => content,
+    };
+    normalize_body(body)
 }
 
 fn load_latest_from_path(path: &Path, current_version: &str) -> Option<ReleaseNotes> {
@@ -173,6 +198,20 @@ pub fn normalize_body(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_notes_body_strips_title_line() {
+        assert_eq!(
+            fork_notes_body("# Fork changes\n\n### Added\n- One\n"),
+            "### Added\n- One"
+        );
+        assert_eq!(fork_notes_body("### Added\n- One\n"), "### Added\n- One");
+    }
+
+    #[test]
+    fn bundled_fork_changelog_produces_notes() {
+        assert!(!fork_notes_body(FORK_CHANGELOG).is_empty());
+    }
 
     #[test]
     fn extracts_version_section() {

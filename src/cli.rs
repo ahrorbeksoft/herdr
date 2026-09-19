@@ -217,8 +217,12 @@ fn channel_set(args: &[String]) -> std::io::Result<i32> {
 
     crate::platform::end_cli_output();
     if let Err(err) = crate::update::self_update(crate::update::SelfUpdateOptions::default()) {
-        eprintln!("update failed: {err}");
-        eprintln!("Run `herdr update` to retry.");
+        if err.starts_with("self-update is disabled") {
+            eprintln!("{err}");
+        } else {
+            eprintln!("update failed: {err}");
+            eprintln!("Run `herdr update` to retry.");
+        }
         return Ok(1);
     }
 
