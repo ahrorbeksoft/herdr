@@ -1,0 +1,48 @@
+id = "fx"
+version = "2026.09.19.1"
+min_engine_version = 1
+updated_at = "2026-09-19T00:00:00Z"
+
+# fx renders an inline shell-like UI: a `┃`-prefixed input box over a status
+# line (`ask|auto|full access · model · effort · context`). While a turn runs,
+# the activity row above the input shows `• Thinking|Generating|Running`
+# optionally followed by `(elapsed)` and `(↑in ↓out)` counters; completed turns
+# leave a two-space-indented `Ns (↑… ↓…)` summary instead of the bullet marker.
+# Approval panels and question prompts replace the input box with options and
+# an `enter confirm|answer · esc cancel` hint row. fx does not set OSC title or
+# OSC 9;4 progress.
+
+[[rules]]
+id = "permission_panel_blocker"
+state = "blocked"
+priority = 980
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+contains = ["enter confirm", "esc cancel"]
+
+[[rules]]
+id = "question_prompt_blocker"
+state = "blocked"
+priority = 970
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+contains = ["enter answer", "esc cancel"]
+
+[[rules]]
+id = "activity_marker_working"
+state = "working"
+priority = 900
+region = "bottom_non_empty_lines(12)"
+visible_working = true
+line_regex = ['^\s*• (Thinking|Generating|Running|Preparing compaction|Compacting)\b']
+
+[[rules]]
+id = "status_line_idle"
+state = "idle"
+priority = 850
+region = "bottom_non_empty_lines(4)"
+visible_idle = true
+all = [
+  { line_regex = ['^\s*┃'] },
+  { line_regex = ['^(ask|auto|full access) · '] },
+]

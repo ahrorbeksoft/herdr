@@ -76,15 +76,24 @@ pub fn persisted_session_from_launch_args(
     let [command, session_id] = args else {
         return None;
     };
-    if agent != crate::detect::Agent::Codex || command != "resume" || session_id.starts_with('-') {
+    if session_id.starts_with('-') {
         return None;
     }
 
-    Some(PersistedAgentSession {
-        source: "herdr:codex".into(),
-        agent: "codex".into(),
-        session_ref: AgentSessionRef::id(session_id.clone())?,
-    })
+    match (agent, command.as_str()) {
+        (crate::detect::Agent::Codex, "resume") => Some(PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: AgentSessionRef::id(session_id.clone())?,
+        }),
+        // `fx --resume <id>` arrives as two argv entries behind the launcher.
+        (crate::detect::Agent::Fx, "--resume") => Some(PersistedAgentSession {
+            source: "herdr:fx".into(),
+            agent: "fx".into(),
+            session_ref: AgentSessionRef::id(session_id.clone())?,
+        }),
+        _ => None,
+    }
 }
 
 pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
@@ -225,6 +234,9 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         ("herdr:grok", "grok", AgentSessionRefKind::Id) => {
             vec!["grok".into(), "--resume".into(), session_ref.value.clone()]
         }
+        ("herdr:fx", "fx", AgentSessionRefKind::Id) => {
+            vec!["fx".into(), "--resume".into(), session_ref.value.clone()]
+        }
         ("herdr:letta", "letta", AgentSessionRefKind::Id) => {
             if let Some(agent_id) = session_ref.value.strip_prefix("default:") {
                 if agent_id.is_empty() {
@@ -283,6 +295,7 @@ pub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("herdr:antigravity_cli", "agy")
             | ("herdr:grok", "grok")
             | ("herdr:letta", "letta")
+            | ("herdr:fx", "fx")
     )
 }
 
@@ -351,6 +364,35 @@ mod tests {
                 "resume".into(),
                 "remote-session".into(),
             ]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn fx_resume_flag_launch_records_session() {
+        assert_eq!(
+            persisted_session_from_launch_args(
+                crate::detect::Agent::Fx,
+                &["--resume".into(), "fx-session".into()]
+            )
+            .unwrap()
+            .session_ref
+            .value,
+            "fx-session"
+        );
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Fx,
+            &["--resume".into(), "last".into()]
+        )
+        .is_some());
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Fx,
+            &["--resume".into(), "--last".into()]
+        )
+        .is_none());
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Fx,
+            &["ask".into(), "fx-session".into()]
         )
         .is_none());
     }
@@ -563,6 +605,16 @@ mod tests {
             &AgentSessionRef::id("default:").unwrap()
         )
         .is_none());
+        assert_eq!(
+            plan(
+                "herdr:fx",
+                "fx",
+                &AgentSessionRef::id("fx-session").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["fx", "--resume", "fx-session"]
+        );
     }
 
     #[test]

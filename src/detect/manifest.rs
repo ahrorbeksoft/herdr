@@ -246,6 +246,7 @@ const BUNDLED_MANIFESTS: &[(&str, &str)] = &[
     ("cursor", include_str!("manifests/cursor.toml")),
     ("devin", include_str!("manifests/devin.toml")),
     ("droid", include_str!("manifests/droid.toml")),
+    ("fx", include_str!("manifests/fx.toml")),
     ("gemini", include_str!("manifests/gemini.toml")),
     ("grok", include_str!("manifests/grok.toml")),
     ("hermes", include_str!("manifests/hermes.toml")),
