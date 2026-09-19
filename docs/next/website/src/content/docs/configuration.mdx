@@ -251,6 +251,8 @@ name = "catppuccin"
 
 Search `theme.name` in the [Config reference](/docs/config-reference/) for every built-in theme. Use `terminal` when you want Herdr UI colors to follow your host terminal's ANSI palette.
 
+Inside Ghostty, `name = "ghostty"` derives Herdr's palette from whatever theme Ghostty is configured with (including `dark:X,light:Y` splits), and `name = "ghostty:<theme name>"` pins a specific Ghostty theme. Every discovered Ghostty theme also appears in the Settings theme list; browsing a theme live-recolors the terminal instantly, and applying it writes Ghostty's `theme =` line and reloads Ghostty.
+
 To let Herdr switch its own UI theme when the host terminal reports a light/dark appearance change, enable theme auto-switching:
 
 ```toml

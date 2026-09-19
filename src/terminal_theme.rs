@@ -132,6 +132,37 @@ pub fn osc_reset_default_color_sequence(kind: DefaultColorKind) -> &'static str 
     }
 }
 
+fn osc_color_value(color: RgbColor) -> String {
+    format!("rgb:{:02x}/{:02x}/{:02x}", color.r, color.g, color.b)
+}
+
+/// OSC 4 — set one ANSI palette color on the host terminal.
+pub fn osc_set_palette_color_sequence(index: u8, color: RgbColor) -> String {
+    format!("\x1b]4;{index};{}\x1b\\", osc_color_value(color))
+}
+
+/// OSC 104 — reset every ANSI palette color to the configured theme.
+pub const OSC_RESET_PALETTE_COLORS_SEQUENCE: &str = "\x1b]104\x1b\\";
+
+/// OSC 12 — set the cursor color on the host terminal.
+pub fn osc_set_cursor_color_sequence(color: RgbColor) -> String {
+    format!("\x1b]12;{}\x1b\\", osc_color_value(color))
+}
+
+/// OSC 112 — reset the cursor color to the configured theme.
+pub const OSC_RESET_CURSOR_COLOR_SEQUENCE: &str = "\x1b]112\x1b\\";
+
+/// OSC 17/19 — set the selection highlight background/foreground.
+pub fn osc_set_selection_color_sequence(foreground: bool, color: RgbColor) -> String {
+    let command = if foreground { 19 } else { 17 };
+    format!("\x1b]{command};{}\x1b\\", osc_color_value(color))
+}
+
+/// OSC 117 — reset the selection background to the configured theme.
+pub const OSC_RESET_SELECTION_BACKGROUND_SEQUENCE: &str = "\x1b]117\x1b\\";
+/// OSC 119 — reset the selection foreground to the configured theme.
+pub const OSC_RESET_SELECTION_FOREGROUND_SEQUENCE: &str = "\x1b]119\x1b\\";
+
 fn parse_rgb_color(value: &str) -> Option<RgbColor> {
     if let Some(rgb) = value.strip_prefix("rgb:") {
         let mut parts = rgb.split('/');

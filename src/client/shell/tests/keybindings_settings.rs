@@ -826,3 +826,186 @@ fn resize_mode_reuses_endpoint_resize_and_stays_active_until_done() {
     assert!(state.handle_input_bytes(b"\r").actions.is_empty());
     assert_eq!(state.mode, ClientShellMode::Terminal);
 }
+
+const GHOSTTY_SAMPLE_THEME: &str = "\
+palette = 0=#26233a
+palette = 1=#eb6f92
+palette = 4=#9ccfd8
+background = #191724
+foreground = #e0def4
+selection-background = #403d52
+";
+
+fn ghostty_test_dir(slug: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-settings-ghostty-{slug}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn settings_theme_list_includes_ghostty_themes() {
+    let _guard = crate::config::test_config_env_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let dir = ghostty_test_dir("list");
+    std::fs::write(dir.join("Test One"), GHOSTTY_SAMPLE_THEME).unwrap();
+    std::fs::write(dir.join("Test Two"), GHOSTTY_SAMPLE_THEME).unwrap();
+    std::env::set_var("HERDR_GHOSTTY_THEMES_DIR", &dir);
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.open_settings_overlay();
+    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_ref() else {
+        panic!("settings overlay should be open");
+    };
+    assert_eq!(settings.theme_choices[0].value, "catppuccin");
+    assert!(settings
+        .theme_choices
+        .iter()
+        .any(|choice| choice.value == "ghostty"));
+    assert!(settings
+        .theme_choices
+        .iter()
+        .any(|choice| choice.value == "ghostty:Test One"));
+    assert!(settings
+        .theme_choices
+        .iter()
+        .any(|choice| choice.value == "ghostty:Test Two"));
+
+    std::env::remove_var("HERDR_GHOSTTY_THEMES_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn settings_theme_filter_narrows_choices() {
+    let _guard = crate::config::test_config_env_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let dir = ghostty_test_dir("filter");
+    std::fs::write(dir.join("Zebra Night"), GHOSTTY_SAMPLE_THEME).unwrap();
+    std::env::set_var("HERDR_GHOSTTY_THEMES_DIR", &dir);
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.open_settings_overlay();
+    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() else {
+        panic!("settings overlay should be open");
+    };
+    settings.query.insert("zebra");
+    let filtered = settings.filtered_theme_indices();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(
+        settings.theme_choices[filtered[0]].value,
+        "ghostty:Zebra Night"
+    );
+
+    std::env::remove_var("HERDR_GHOSTTY_THEMES_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn select_theme_choice(state: &mut ClientShellState, value: &str) {
+    let index = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Settings(settings)) => settings
+            .theme_choices
+            .iter()
+            .position(|choice| choice.value == value)
+            .unwrap_or_else(|| panic!("theme choice {value} present")),
+        _ => panic!("settings overlay should be open"),
+    };
+    state.select_settings_choice(index);
+}
+
+#[test]
+fn ghostty_preview_recolors_host_without_touching_config() {
+    let _guard = crate::config::test_config_env_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let dir = ghostty_test_dir("preview");
+    std::fs::write(dir.join("Preview Me"), GHOSTTY_SAMPLE_THEME).unwrap();
+    let ghostty_config = dir.join("ghostty-config");
+    let original = "theme = Original Theme\nother = 1\n";
+    std::fs::write(&ghostty_config, original).unwrap();
+    std::env::set_var("HERDR_GHOSTTY_THEMES_DIR", &dir);
+    std::env::set_var("GHOSTTY_CONFIG", &ghostty_config);
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    select_theme_choice(&mut state, "ghostty:Preview Me");
+
+    // The preview is OSC-only: herdr's palette updates and the host terminal
+    // is marked as recolored, but Ghostty's config is untouched.
+    assert_eq!(state.config.theme_name, "ghostty:Preview Me");
+    assert_eq!(state.ghostty_osc_theme.as_deref(), Some("Preview Me"));
+    assert_eq!(std::fs::read_to_string(&ghostty_config).unwrap(), original);
+
+    // Cancel restores herdr state; the Ghostty config was never modified.
+    state.cancel_settings_overlay();
+    assert!(state.ghostty_osc_theme.is_none());
+    assert_eq!(std::fs::read_to_string(&ghostty_config).unwrap(), original);
+
+    std::env::remove_var("HERDR_GHOSTTY_THEMES_DIR");
+    std::env::remove_var("GHOSTTY_CONFIG");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ghostty_theme_apply_writes_config() {
+    let _guard = crate::config::test_config_env_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let dir = ghostty_test_dir("apply");
+    std::fs::write(dir.join("Preview Me"), GHOSTTY_SAMPLE_THEME).unwrap();
+    let ghostty_config = dir.join("ghostty-config");
+    std::fs::write(&ghostty_config, "theme = Original Theme\nother = 1\n").unwrap();
+    let herdr_config = dir.join("herdr-config.toml");
+    std::env::set_var("HERDR_GHOSTTY_THEMES_DIR", &dir);
+    std::env::set_var("GHOSTTY_CONFIG", &ghostty_config);
+    std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &herdr_config);
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    select_theme_choice(&mut state, "ghostty:Preview Me");
+    state.apply_settings_choice(&mut ClientShellInput::default());
+
+    // Enter persisted herdr's theme reference and synced Ghostty's config.
+    assert!(state.overlay.is_none());
+    let written = std::fs::read_to_string(&ghostty_config).unwrap();
+    assert!(written.contains("theme = Preview Me"), "written: {written}");
+    assert!(!written.contains("theme = Original Theme"));
+    let saved = std::fs::read_to_string(&herdr_config).unwrap();
+    assert!(saved.contains("ghostty:Preview Me"), "saved: {saved}");
+    // The OSC preview already showed this theme — no reset needed.
+    assert!(state.ghostty_osc_theme.is_none());
+
+    std::env::remove_var("HERDR_GHOSTTY_THEMES_DIR");
+    std::env::remove_var("GHOSTTY_CONFIG");
+    std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ghostty_builtin_preview_resets_when_unmapped() {
+    let _guard = crate::config::test_config_env_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let dir = ghostty_test_dir("unmapped");
+    std::fs::write(dir.join("Nord"), GHOSTTY_SAMPLE_THEME).unwrap();
+    std::env::set_var("HERDR_GHOSTTY_THEMES_DIR", &dir);
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.open_settings_overlay();
+    select_theme_choice(&mut state, "nord");
+    assert_eq!(state.ghostty_osc_theme.as_deref(), Some("Nord"));
+
+    // `terminal` maps to no Ghostty theme — the host preview resets.
+    select_theme_choice(&mut state, "terminal");
+    assert!(state.ghostty_osc_theme.is_none());
+
+    std::env::remove_var("HERDR_GHOSTTY_THEMES_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
+}

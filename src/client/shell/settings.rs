@@ -5,11 +5,50 @@ pub(super) fn normalized_theme_name(name: &str) -> String {
     name.to_lowercase().replace([' ', '_'], "-")
 }
 
-fn theme_index(name: &str) -> usize {
-    let normalized = normalized_theme_name(name);
-    crate::config::THEME_NAMES
+/// Write a terminal escape sequence to the host terminal. Instant and
+/// side-effect free — used for live Ghostty color previews while browsing
+/// the theme list. Gated out of test builds so unit tests never emit OSC.
+fn emit_host_sequence(sequence: &str) {
+    #[cfg(not(test))]
+    {
+        use std::io::Write as _;
+        let _ = std::io::stdout().write_all(sequence.as_bytes());
+        let _ = std::io::stdout().flush();
+    }
+    #[cfg(test)]
+    let _ = sequence;
+}
+
+/// All entries shown in the settings theme list: built-in themes first,
+/// then a `ghostty` follow entry and every discovered Ghostty theme.
+fn theme_choices() -> Vec<ClientThemeChoice> {
+    let mut choices: Vec<ClientThemeChoice> = crate::config::THEME_NAMES
         .iter()
-        .position(|candidate| normalized_theme_name(candidate) == normalized)
+        .map(|name| ClientThemeChoice {
+            label: (*name).to_owned(),
+            value: (*name).to_owned(),
+        })
+        .collect();
+    let ghostty_names = crate::config::ghostty_theme_names();
+    if ghostty_names.is_empty() {
+        return choices;
+    }
+    choices.push(ClientThemeChoice {
+        label: "ghostty (follow)".to_owned(),
+        value: "ghostty".to_owned(),
+    });
+    choices.extend(ghostty_names.into_iter().map(|name| ClientThemeChoice {
+        value: format!("{}{}", crate::config::GHOSTTY_THEME_PREFIX, name),
+        label: name,
+    }));
+    choices
+}
+
+fn theme_choice_index(choices: &[ClientThemeChoice], name: &str) -> usize {
+    let normalized = normalized_theme_name(name);
+    choices
+        .iter()
+        .position(|choice| normalized_theme_name(&choice.value) == normalized)
         .unwrap_or(0)
 }
 
@@ -33,11 +72,15 @@ pub(super) fn integration_needs_install(info: &crate::api::schema::IntegrationIn
 
 impl ClientShellState {
     pub(super) fn open_settings_overlay(&mut self) {
+        let choices = theme_choices();
         self.overlay = Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
             section: ClientSettingsSection::Theme,
-            selected: theme_index(&self.config.theme_name),
+            selected: theme_choice_index(&choices, &self.config.theme_name),
             original_theme_name: self.config.theme_name.clone(),
             original_palette: self.config.palette.clone(),
+            theme_choices: choices,
+            query: TextEditor::default(),
+            search_focused: false,
             integrations: Vec::new(),
             integration_messages: Vec::new(),
             loading_integrations: false,
@@ -47,7 +90,12 @@ impl ClientShellState {
 
     fn selected_index_for_settings_section(&self, section: ClientSettingsSection) -> usize {
         match section {
-            ClientSettingsSection::Theme => theme_index(&self.config.theme_name),
+            ClientSettingsSection::Theme => match &self.overlay {
+                Some(ClientShellOverlay::Settings(settings)) => {
+                    theme_choice_index(&settings.theme_choices, &self.config.theme_name)
+                }
+                _ => 0,
+            },
             ClientSettingsSection::Indicators => indicator_index(self.config.status_indicators),
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
@@ -73,6 +121,7 @@ impl ClientShellState {
         if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
             settings.section = section;
             settings.selected = selected;
+            settings.search_focused = false;
         }
         if request_integrations {
             self.queue_integration_list(outcome, true);
@@ -96,7 +145,7 @@ impl ClientShellState {
     fn settings_choice_count(&self) -> usize {
         match self.overlay.as_ref() {
             Some(ClientShellOverlay::Settings(settings)) => match settings.section {
-                ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
+                ClientSettingsSection::Theme => settings.filtered_theme_indices().len(),
                 ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
                 ClientSettingsSection::Toast => 4,
                 ClientSettingsSection::Integrations => settings.integrations.len(),
@@ -114,8 +163,23 @@ impl ClientShellState {
             settings.selected = 0;
             return;
         }
-        settings.selected = (settings.selected as isize + delta)
-            .clamp(0, count.saturating_sub(1) as isize) as usize;
+        if settings.section == ClientSettingsSection::Theme {
+            // `selected` is a theme-choices index; move within the filtered
+            // positions like the worktree open picker.
+            let filtered = settings.filtered_theme_indices();
+            let position = filtered
+                .iter()
+                .position(|index| *index == settings.selected)
+                .unwrap_or(0);
+            let next = (position as isize + delta)
+                .clamp(0, filtered.len().saturating_sub(1) as isize)
+                as usize;
+            settings.selected = filtered[next];
+        } else {
+            settings.selected = (settings.selected as isize + delta)
+                .clamp(0, count.saturating_sub(1) as isize)
+                as usize;
+        }
         if settings.section == ClientSettingsSection::Theme {
             self.preview_selected_theme();
         }
@@ -125,7 +189,11 @@ impl ClientShellState {
         let count = self.settings_choice_count();
         if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
             if count > 0 {
-                settings.selected = index.min(count - 1);
+                settings.selected = if settings.section == ClientSettingsSection::Theme {
+                    index.min(settings.theme_choices.len().saturating_sub(1))
+                } else {
+                    index.min(count - 1)
+                };
             }
         }
         if matches!(
@@ -143,12 +211,96 @@ impl ClientShellState {
         let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_ref() else {
             return;
         };
-        let Some(name) = crate::config::THEME_NAMES.get(settings.selected) else {
+        let Some(choice) = settings
+            .selected_theme_index()
+            .and_then(|index| settings.theme_choices.get(index))
+        else {
             return;
         };
-        self.config.theme_name = (*name).to_owned();
+        let value = choice.value.clone();
+        self.config.theme_name = value.clone();
         self.config.palette =
-            crate::app::client_palette_for_theme(&self.config.theme_runtime, name);
+            crate::app::client_palette_for_theme(&self.config.theme_runtime, &value);
+        // Instant host-side preview: OSC sequences recolor the terminal
+        // without touching Ghostty's config. Enter persists through
+        // sync_ghostty_theme; Esc restores via reset sequences.
+        match crate::config::ghostty_name_for_herdr_theme(&value)
+            .and_then(|name| crate::config::load_ghostty_theme(&name).map(|spec| (name, spec)))
+        {
+            Some((name, spec)) => {
+                emit_host_sequence(&crate::config::ghostty_preview_sequence(&spec));
+                self.ghostty_osc_theme = Some(name);
+            }
+            None => self.restore_ghostty_preview(),
+        }
+    }
+
+    /// Persist the effective herdr theme to Ghostty's config
+    /// (`theme = ...`, or a `dark:X,light:Y` pair when herdr auto-switches)
+    /// and ask Ghostty to reload. Only writes when the value changed.
+    pub(crate) fn sync_ghostty_theme(&mut self) {
+        // Unit tests must set GHOSTTY_CONFIG to opt into real file access.
+        if cfg!(test) && std::env::var_os(crate::config::GHOSTTY_CONFIG_ENV).is_none() {
+            return;
+        }
+        let Some(desired) = crate::app::ghostty_theme_value_for_runtime(
+            &self.config.theme_runtime,
+            self.host_appearance,
+        ) else {
+            return;
+        };
+        let path = crate::config::ghostty_config_path();
+        if !path.exists() {
+            return;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Some(updated) = crate::config::ghostty_config_sync_update(&content, &desired) else {
+            return;
+        };
+        if std::fs::write(&path, updated).is_err() {
+            return;
+        }
+        // SIGUSR2 reloads Ghostty's configuration.
+        #[cfg(all(unix, not(test)))]
+        {
+            let reloaded = std::process::Command::new("pkill")
+                .args(["-USR2", "-i", "-x", "ghostty"])
+                .status()
+                .is_ok_and(|status| status.success());
+            if !reloaded {
+                let _ = std::process::Command::new("pkill")
+                    .args(["-USR2", "-x", "ghostty"])
+                    .status();
+            }
+        }
+    }
+
+    /// Undo a host-terminal OSC preview, restoring the terminal's
+    /// configured colors.
+    pub(super) fn restore_ghostty_preview(&mut self) {
+        if self.ghostty_osc_theme.take().is_some() {
+            emit_host_sequence(&crate::config::ghostty_preview_reset_sequence());
+        }
+    }
+
+    /// The applied theme is now the end state: keep the OSC preview when it
+    /// already shows the theme Ghostty is about to load (zero flicker), and
+    /// reset to the configured colors otherwise.
+    fn settle_ghostty_preview(&mut self) {
+        let resolved = crate::app::ghostty_theme_value_for_runtime(
+            &self.config.theme_runtime,
+            self.host_appearance,
+        )
+        .and_then(|value| {
+            crate::app::ghostty_theme_name_for_appearance(&value, self.host_appearance)
+        });
+        if resolved.is_some() && resolved == self.ghostty_osc_theme {
+            self.ghostty_osc_theme = None;
+        } else {
+            self.restore_ghostty_preview();
+        }
     }
 
     pub(super) fn cancel_settings_overlay(&mut self) {
@@ -157,6 +309,7 @@ impl ClientShellState {
         };
         self.config.theme_name = settings.original_theme_name;
         self.config.palette = settings.original_palette;
+        self.restore_ghostty_preview();
     }
 
     fn save_settings_edit(
@@ -189,10 +342,16 @@ impl ClientShellState {
         let selected = settings.selected;
         match section {
             ClientSettingsSection::Theme => {
-                let Some(name) = crate::config::THEME_NAMES.get(selected).copied() else {
+                let Some(name) = settings
+                    .selected_theme_index()
+                    .and_then(|index| settings.theme_choices.get(index))
+                    .map(|choice| choice.value.clone())
+                else {
                     return;
                 };
-                if self.save_settings_edit(crate::config::ConfigEdit::Theme(name), outcome) {
+                if self.save_settings_edit(crate::config::ConfigEdit::Theme(&name), outcome) {
+                    // The previewed Ghostty theme is the applied end state.
+                    self.settle_ghostty_preview();
                     self.overlay = None;
                 }
             }
@@ -223,6 +382,11 @@ impl ClientShellState {
                 );
             }
             ClientSettingsSection::Integrations => self.install_recommended_integrations(outcome),
+        }
+        if section != ClientSettingsSection::Theme {
+            // A non-theme apply leaves the theme unchanged — undo any
+            // Ghostty preview writes from browsing the theme list.
+            self.restore_ghostty_preview();
         }
     }
 
@@ -357,6 +521,20 @@ impl ClientShellState {
         }
         let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
         if code == KeyCode::Esc {
+            // First Esc leaves the theme filter; second Esc closes.
+            if matches!(
+                self.overlay,
+                Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
+                    search_focused: true,
+                    ..
+                }))
+            ) {
+                if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+                    settings.search_focused = false;
+                }
+                outcome.repaint = true;
+                return true;
+            }
             if !matches!(
                 self.overlay,
                 Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
@@ -367,6 +545,53 @@ impl ClientShellState {
                 self.cancel_settings_overlay();
                 outcome.repaint = true;
             }
+            return true;
+        }
+        // Filter input for the theme list (same pattern as the worktree
+        // open picker): while search is focused, printable keys edit the
+        // query and selection follows the first match.
+        let theme_search_focused = matches!(
+            self.overlay,
+            Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
+                section: ClientSettingsSection::Theme,
+                search_focused: true,
+                ..
+            }))
+        );
+        if theme_search_focused {
+            let mut handled = false;
+            let mut preview = false;
+            if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+                if let Some(content_changed) = settings.query.handle_key(key) {
+                    if content_changed {
+                        if let Some(first) = settings.filtered_theme_indices().first().copied() {
+                            settings.selected = first;
+                        }
+                        preview = true;
+                    }
+                    handled = true;
+                    outcome.repaint = true;
+                }
+            }
+            if preview {
+                self.preview_selected_theme();
+            }
+            if handled {
+                return true;
+            }
+        }
+        let theme_section = matches!(
+            self.overlay,
+            Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
+                section: ClientSettingsSection::Theme,
+                ..
+            }))
+        );
+        if theme_section && code == KeyCode::Char('/') && modifiers.is_empty() {
+            if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+                settings.search_focused = true;
+            }
+            outcome.repaint = true;
             return true;
         }
         if matches!(code, KeyCode::Tab | KeyCode::Right | KeyCode::Char('l'))
@@ -393,6 +618,30 @@ impl ClientShellState {
         }
         if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) && modifiers.is_empty() {
             self.apply_settings_choice(outcome);
+            return true;
+        }
+        // Typeahead: any other printable character in the theme list starts
+        // a filter query directly (j/k/h/l keep their navigation roles).
+        if theme_section
+            && matches!(code, KeyCode::Char(_))
+            && modifiers.difference(KeyModifiers::SHIFT).is_empty()
+        {
+            let mut content_changed = false;
+            if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+                settings.search_focused = true;
+                if let Some(changed) = settings.query.handle_key(key) {
+                    content_changed = changed;
+                    if changed {
+                        if let Some(first) = settings.filtered_theme_indices().first().copied() {
+                            settings.selected = first;
+                        }
+                    }
+                }
+            }
+            if content_changed {
+                self.preview_selected_theme();
+            }
+            outcome.repaint = true;
             return true;
         }
         true

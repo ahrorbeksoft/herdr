@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
+mod ghostty;
 mod io;
 mod keybinds;
 mod model;
@@ -11,6 +12,7 @@ mod window_title;
 mod write;
 
 pub use self::{
+    ghostty::{GhosttyThemeSetting, GhosttyThemeSpec},
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
         remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_bool,
@@ -41,6 +43,12 @@ pub use self::{
 pub(crate) use self::keybinds::parse_key_combo;
 pub(crate) use self::write::{update_file_at, write_edit, ConfigEdit};
 pub(crate) use self::{
+    ghostty::{
+        ghostty_config_path, ghostty_config_sync_update, ghostty_config_theme_setting,
+        ghostty_name_for_herdr_theme, ghostty_preview_reset_sequence, ghostty_preview_sequence,
+        ghostty_theme_names, ghostty_theme_ref, load_ghostty_theme, parse_ghostty_theme_setting,
+        GHOSTTY_CONFIG_ENV, GHOSTTY_THEME_PREFIX,
+    },
     io::upsert_top_level_bool,
     tab_bar::{
         parse_tab_bar_datetime_format, tab_bar_right_diagnostics,

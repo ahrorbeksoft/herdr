@@ -73,6 +73,65 @@ pub struct Palette {
     pub peach: Color,
 }
 
+/// Best-effort RGB approximation of a terminal color for blending.
+fn color_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index) => {
+            // ANSI cube approximation: 0-7 normal, 8-15 bright.
+            const ANSI: [(u8, u8, u8); 16] = [
+                (0, 0, 0),
+                (205, 0, 0),
+                (0, 205, 0),
+                (205, 205, 0),
+                (0, 0, 238),
+                (205, 0, 205),
+                (0, 205, 205),
+                (229, 229, 229),
+                (127, 127, 127),
+                (255, 0, 0),
+                (0, 255, 0),
+                (255, 255, 0),
+                (92, 92, 255),
+                (255, 0, 255),
+                (0, 255, 255),
+                (255, 255, 255),
+            ];
+            ANSI[usize::from(index).min(15)]
+        }
+        Color::Black => (0, 0, 0),
+        Color::Red => (205, 0, 0),
+        Color::Green => (0, 205, 0),
+        Color::Yellow => (205, 205, 0),
+        Color::Blue => (0, 0, 238),
+        Color::Magenta => (205, 0, 205),
+        Color::Cyan => (0, 205, 205),
+        Color::White | Color::Gray => (229, 229, 229),
+        Color::DarkGray => (127, 127, 127),
+        Color::LightRed => (255, 0, 0),
+        Color::LightGreen => (0, 255, 0),
+        Color::LightYellow => (255, 255, 0),
+        Color::LightBlue => (92, 92, 255),
+        Color::LightMagenta => (255, 0, 255),
+        Color::LightCyan => (0, 255, 255),
+        Color::Reset => (0, 0, 0),
+    }
+}
+
+/// Relative luminance in 0..=1 for a terminal color.
+fn color_luminance(color: Color) -> f32 {
+    let (r, g, b) = color_rgb(color);
+    (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32) / 255.0
+}
+
+/// Linear blend between two terminal colors; `t` is the weight of `b`.
+fn mix_colors(a: Color, b: Color, t: f32) -> Color {
+    let (ar, ag, ab) = color_rgb(a);
+    let (br, bg, bb) = color_rgb(b);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color::Rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
+}
+
 impl Palette {
     /// Catppuccin Mocha — the default.
     pub fn catppuccin() -> Self {
@@ -546,6 +605,62 @@ impl Palette {
             "rose-pine-dawn" => Some(Self::rose_pine_dawn()),
             "vesper" => Some(Self::vesper()),
             _ => None,
+        }
+    }
+
+    /// Synthesize a palette from a Ghostty theme spec.
+    ///
+    /// Ghostty themes define a background, foreground, ANSI palette 0-15 and
+    /// selection colors; herdr's surface/overlay tokens are derived by
+    /// blending background toward foreground at fixed ratios, which adapts
+    /// to both dark and light themes.
+    pub fn from_ghostty(spec: &crate::config::GhosttyThemeSpec) -> Self {
+        use crate::config::parse_color;
+        let color = |value: &Option<String>| value.as_deref().map(parse_color);
+        let ansi = |index: usize| color(&spec.palette[index]);
+
+        let background = color(&spec.background);
+        let foreground = color(&spec.foreground);
+        // Derivation needs concrete RGB endpoints; fall back to an
+        // opposing luminance when a theme omits background/foreground.
+        let bg = background.unwrap_or_else(|| {
+            if foreground.is_some_and(|fg| color_luminance(fg) > 0.5) {
+                Color::Rgb(0, 0, 0)
+            } else {
+                Color::Rgb(255, 255, 255)
+            }
+        });
+        let fg = foreground.unwrap_or_else(|| {
+            if color_luminance(bg) > 0.5 {
+                Color::Rgb(0, 0, 0)
+            } else {
+                Color::Rgb(255, 255, 255)
+            }
+        });
+        let blend = |t: f32| mix_colors(bg, fg, t);
+        let status =
+            |index: usize, fallback: usize| ansi(index).or_else(|| ansi(fallback)).unwrap_or(fg);
+
+        Self {
+            accent: status(4, 12),
+            panel_bg: bg,
+            sidebar_bg: bg,
+            active_row_bg: blend(0.10),
+            selection_bg: color(&spec.selection_background).unwrap_or_else(|| blend(0.22)),
+            surface0: blend(0.08),
+            surface1: blend(0.16),
+            surface_dim: blend(0.28),
+            overlay0: blend(0.45),
+            overlay1: blend(0.60),
+            text: fg,
+            subtext0: ansi(8).unwrap_or_else(|| blend(0.55)),
+            mauve: status(5, 13),
+            green: status(2, 10),
+            yellow: status(3, 11),
+            red: status(1, 9),
+            blue: status(4, 12),
+            teal: status(6, 14),
+            peach: status(11, 3),
         }
     }
 
@@ -1502,5 +1617,58 @@ mod tests {
             KeyCode::Char('b'),
             KeyModifiers::SHIFT,
         ));
+    }
+
+    fn ghostty_spec() -> crate::config::GhosttyThemeSpec {
+        let mut spec = crate::config::GhosttyThemeSpec {
+            background: Some("#191724".to_string()),
+            foreground: Some("#e0def4".to_string()),
+            selection_background: Some("#403d52".to_string()),
+            ..Default::default()
+        };
+        spec.palette[1] = Some("#eb6f92".to_string());
+        spec.palette[2] = Some("#31748f".to_string());
+        spec.palette[4] = Some("#9ccfd8".to_string());
+        spec.palette[8] = Some("#6e6a86".to_string());
+        spec.palette[11] = Some("#f6c177".to_string());
+        spec
+    }
+
+    #[test]
+    fn palette_from_ghostty_maps_ghostty_fields() {
+        let palette = Palette::from_ghostty(&ghostty_spec());
+        assert_eq!(palette.text, Color::Rgb(0xe0, 0xde, 0xf4));
+        assert_eq!(palette.panel_bg, Color::Rgb(0x19, 0x17, 0x24));
+        assert_eq!(palette.sidebar_bg, Color::Rgb(0x19, 0x17, 0x24));
+        assert_eq!(palette.accent, Color::Rgb(0x9c, 0xcf, 0xd8));
+        assert_eq!(palette.red, Color::Rgb(0xeb, 0x6f, 0x92));
+        assert_eq!(palette.green, Color::Rgb(0x31, 0x74, 0x8f));
+        assert_eq!(palette.peach, Color::Rgb(0xf6, 0xc1, 0x77));
+        assert_eq!(palette.subtext0, Color::Rgb(0x6e, 0x6a, 0x86));
+        assert_eq!(palette.selection_bg, Color::Rgb(0x40, 0x3d, 0x52));
+    }
+
+    #[test]
+    fn palette_from_ghostty_derives_surfaces_between_bg_and_fg() {
+        let palette = Palette::from_ghostty(&ghostty_spec());
+        let bg = Color::Rgb(0x19, 0x17, 0x24);
+        let fg = Color::Rgb(0xe0, 0xde, 0xf4);
+        assert_eq!(palette.surface0, mix_colors(bg, fg, 0.08));
+        assert_eq!(palette.surface_dim, mix_colors(bg, fg, 0.28));
+        assert_eq!(palette.overlay0, mix_colors(bg, fg, 0.45));
+        // Monotone luminance: dimmest to brightest token ordering holds.
+        assert!(color_luminance(palette.surface0) < color_luminance(palette.surface_dim));
+        assert!(color_luminance(palette.surface_dim) < color_luminance(palette.overlay0));
+    }
+
+    #[test]
+    fn palette_from_ghostty_light_theme_derives_descending_surfaces() {
+        let mut spec = ghostty_spec();
+        spec.background = Some("#f2e9e1".to_string());
+        spec.foreground = Some("#575279".to_string());
+        let palette = Palette::from_ghostty(&spec);
+        // Light theme: derived surfaces darken toward the foreground.
+        assert!(color_luminance(palette.surface0) < color_luminance(palette.panel_bg));
+        assert!(color_luminance(palette.surface_dim) < color_luminance(palette.surface0));
     }
 }

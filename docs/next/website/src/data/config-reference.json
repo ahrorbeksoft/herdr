@@ -38,7 +38,7 @@
           "key": "theme.name",
           "type": "string",
           "default": "\"catppuccin\"",
-          "description": "Built-in theme name."
+          "description": "Built-in theme name. Inside Ghostty, \"ghostty\" follows Ghostty's configured theme and \"ghostty:<name>\" pins a specific Ghostty theme; applying a theme from Settings also syncs Ghostty's `theme` line."
         },
         {
           "key": "theme.auto_switch",

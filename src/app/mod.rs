@@ -271,20 +271,65 @@ fn theme_runtime_config(
     }
 }
 
+/// Expand a bare `ghostty` theme name into `ghostty:<resolved>` using the
+/// theme Ghostty itself is configured with and the host appearance.
+/// Returns `None` when the name is not a bare `ghostty` reference.
+fn expand_bare_ghostty_theme(
+    name: &str,
+    appearance: Option<crate::terminal_theme::HostAppearance>,
+) -> Option<String> {
+    if !matches!(crate::config::ghostty_theme_ref(name), Some(None)) {
+        return None;
+    }
+    let config_path = crate::config::ghostty_config_path();
+    let setting = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|content| crate::config::ghostty_config_theme_setting(&content));
+    let resolved = match setting {
+        Some(crate::config::GhosttyThemeSetting::Single(name)) => Some(name),
+        Some(crate::config::GhosttyThemeSetting::Split { dark, light }) => {
+            match appearance.unwrap_or(crate::terminal_theme::HostAppearance::Dark) {
+                crate::terminal_theme::HostAppearance::Dark => Some(dark),
+                crate::terminal_theme::HostAppearance::Light => Some(light),
+            }
+        }
+        None => None,
+    };
+    resolved.map(|name| format!("{}{}", crate::config::GHOSTTY_THEME_PREFIX, name))
+}
+
 fn resolve_palette_for_theme_name(
     name: &str,
     fallback_name: &str,
     runtime: &state::ThemeRuntimeConfig,
     mode_custom: Option<&crate::config::ModeThemeColors>,
 ) -> state::Palette {
-    let mut palette = state::Palette::from_name(name).unwrap_or_else(|| {
-        tracing::warn!(
-            theme = name,
-            fallback = fallback_name,
-            "unknown theme, falling back"
-        );
-        state::Palette::from_name(fallback_name).unwrap_or_else(state::Palette::catppuccin)
-    });
+    let mut palette = match crate::config::ghostty_theme_ref(name) {
+        Some(Some(ghostty_name)) => match crate::config::load_ghostty_theme(&ghostty_name) {
+            Some(spec) => state::Palette::from_ghostty(&spec),
+            None => {
+                tracing::warn!(
+                    theme = name,
+                    fallback = fallback_name,
+                    "unknown ghostty theme, falling back"
+                );
+                state::Palette::from_name(fallback_name).unwrap_or_else(state::Palette::catppuccin)
+            }
+        },
+        Some(None) => {
+            // Bare `ghostty` unresolved (no Ghostty config or not expanded
+            // upstream): follow the fallback instead of failing.
+            state::Palette::from_name(fallback_name).unwrap_or_else(state::Palette::catppuccin)
+        }
+        None => state::Palette::from_name(name).unwrap_or_else(|| {
+            tracing::warn!(
+                theme = name,
+                fallback = fallback_name,
+                "unknown theme, falling back"
+            );
+            state::Palette::from_name(fallback_name).unwrap_or_else(state::Palette::catppuccin)
+        }),
+    };
 
     if let Some(custom) = &runtime.custom {
         palette = palette.with_overrides(custom);
@@ -297,6 +342,52 @@ fn resolve_palette_for_theme_name(
     }
 
     palette
+}
+
+/// The `theme` value Ghostty should be configured with for a theme runtime:
+/// a single theme name, a `dark:X,light:Y` pair when herdr auto-switches and
+/// both sides resolve, or `None` when Ghostty should be left alone.
+pub(crate) fn ghostty_theme_value_for_runtime(
+    runtime: &state::ThemeRuntimeConfig,
+    appearance: Option<crate::terminal_theme::HostAppearance>,
+) -> Option<String> {
+    let resolve = |name: &str, appearance: Option<crate::terminal_theme::HostAppearance>| {
+        let expanded = expand_bare_ghostty_theme(name, appearance);
+        crate::config::ghostty_name_for_herdr_theme(expanded.as_deref().unwrap_or(name))
+    };
+    if runtime.auto_switch {
+        let dark = resolve(
+            &runtime.dark_name,
+            Some(crate::terminal_theme::HostAppearance::Dark),
+        );
+        let light = resolve(
+            &runtime.light_name,
+            Some(crate::terminal_theme::HostAppearance::Light),
+        );
+        return match (dark, light) {
+            (Some(dark), Some(light)) => Some(format!("dark:{dark},light:{light}")),
+            (Some(single), None) | (None, Some(single)) => Some(single),
+            (None, None) => None,
+        };
+    }
+    resolve(&runtime.manual_name, appearance)
+}
+
+/// The single Ghostty theme name within a configured `theme` value that
+/// applies to `appearance` — for comparing against a live OSC preview.
+pub(crate) fn ghostty_theme_name_for_appearance(
+    value: &str,
+    appearance: Option<crate::terminal_theme::HostAppearance>,
+) -> Option<String> {
+    match crate::config::parse_ghostty_theme_setting(value)? {
+        crate::config::GhosttyThemeSetting::Single(name) => Some(name),
+        crate::config::GhosttyThemeSetting::Split { dark, light } => Some(
+            match appearance.unwrap_or(crate::terminal_theme::HostAppearance::Dark) {
+                crate::terminal_theme::HostAppearance::Dark => dark,
+                crate::terminal_theme::HostAppearance::Light => light,
+            },
+        ),
+    }
 }
 
 fn resolve_effective_theme(
@@ -325,9 +416,11 @@ fn resolve_effective_theme(
     } else {
         (&runtime.manual_name, "catppuccin", None)
     };
+    let expanded = expand_bare_ghostty_theme(name, appearance);
+    let name = expanded.as_deref().unwrap_or(name);
     (
         resolve_palette_for_theme_name(name, fallback, runtime, mode_custom),
-        name.clone(),
+        name.to_owned(),
     )
 }
 
@@ -339,7 +432,13 @@ pub(crate) fn client_palette_for_theme(
     runtime: &state::ThemeRuntimeConfig,
     name: &str,
 ) -> state::Palette {
-    resolve_palette_for_theme_name(name, "catppuccin", runtime, None)
+    let expanded = expand_bare_ghostty_theme(name, None);
+    resolve_palette_for_theme_name(
+        expanded.as_deref().unwrap_or(name),
+        "catppuccin",
+        runtime,
+        None,
+    )
 }
 
 pub(crate) fn client_palette_from_config(config: &Config) -> state::Palette {
@@ -1491,6 +1590,205 @@ mod tests {
             ratatui::style::Color::Rgb(7, 8, 9)
         );
         assert_eq!(app.state.palette.text, ratatui::style::Color::Rgb(4, 5, 6));
+    }
+
+    const GHOSTTY_TEST_THEME: &str = "\
+palette = 0=#26233a
+palette = 1=#eb6f92
+palette = 4=#9ccfd8
+background = #191724
+foreground = #e0def4
+selection-background = #403d52
+";
+
+    fn ghostty_test_dir(slug: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("herdr-ghostty-{slug}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn ghostty_pinned_theme_resolves_palette() {
+        let _guard = config_env_lock().lock().unwrap();
+        let dir = ghostty_test_dir("pinned");
+        std::fs::write(dir.join("Test Theme"), GHOSTTY_TEST_THEME).unwrap();
+        std::env::set_var("HERDR_GHOSTTY_THEMES_DIR", &dir);
+
+        let config = Config::default();
+        let runtime = client_theme_runtime_from_config(&config);
+        let palette = client_palette_for_theme(&runtime, "ghostty:Test Theme");
+
+        assert_eq!(palette.text, ratatui::style::Color::Rgb(0xe0, 0xde, 0xf4));
+        assert_eq!(
+            palette.panel_bg,
+            ratatui::style::Color::Rgb(0x19, 0x17, 0x24)
+        );
+        assert_eq!(palette.accent, ratatui::style::Color::Rgb(0x9c, 0xcf, 0xd8));
+
+        std::env::remove_var("HERDR_GHOSTTY_THEMES_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ghostty_missing_theme_falls_back() {
+        let _guard = config_env_lock().lock().unwrap();
+        let dir = ghostty_test_dir("missing");
+        std::env::set_var("HERDR_GHOSTTY_THEMES_DIR", &dir);
+
+        let config = Config::default();
+        let runtime = client_theme_runtime_from_config(&config);
+        let palette = client_palette_for_theme(&runtime, "ghostty:No Such Theme");
+
+        assert_eq!(palette, state::Palette::catppuccin());
+
+        std::env::remove_var("HERDR_GHOSTTY_THEMES_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bare_ghostty_follows_ghostty_config_theme() {
+        let _guard = config_env_lock().lock().unwrap();
+        let dir = ghostty_test_dir("follow");
+        std::fs::write(dir.join("Followed"), GHOSTTY_TEST_THEME).unwrap();
+        std::fs::write(
+            dir.join("Light One"),
+            "background = #f2e9e1\nforeground = #575279\n",
+        )
+        .unwrap();
+        let ghostty_config = dir.join("ghostty-config");
+        std::fs::write(&ghostty_config, "theme = dark:Followed,light:Light One\n").unwrap();
+        std::env::set_var("HERDR_GHOSTTY_THEMES_DIR", &dir);
+        std::env::set_var("GHOSTTY_CONFIG", &ghostty_config);
+
+        let mut config = Config::default();
+        config.theme.name = Some("ghostty".to_string());
+        let runtime = client_theme_runtime_from_config(&config);
+
+        let (dark_palette, dark_name) =
+            resolve_effective_theme(&runtime, Some(crate::terminal_theme::HostAppearance::Dark));
+        assert_eq!(dark_name, "ghostty:Followed");
+        assert_eq!(
+            dark_palette.panel_bg,
+            ratatui::style::Color::Rgb(0x19, 0x17, 0x24)
+        );
+
+        let (light_palette, light_name) =
+            resolve_effective_theme(&runtime, Some(crate::terminal_theme::HostAppearance::Light));
+        assert_eq!(light_name, "ghostty:Light One");
+        assert_eq!(
+            light_palette.panel_bg,
+            ratatui::style::Color::Rgb(0xf2, 0xe9, 0xe1)
+        );
+
+        std::env::remove_var("HERDR_GHOSTTY_THEMES_DIR");
+        std::env::remove_var("GHOSTTY_CONFIG");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bare_ghostty_without_config_falls_back() {
+        let _guard = config_env_lock().lock().unwrap();
+        let dir = ghostty_test_dir("bare-missing");
+        let ghostty_config = dir.join("no-config");
+        std::env::set_var("GHOSTTY_CONFIG", &ghostty_config);
+
+        let mut config = Config::default();
+        config.theme.name = Some("ghostty".to_string());
+        let runtime = client_theme_runtime_from_config(&config);
+        let (palette, _) = resolve_effective_theme(&runtime, None);
+
+        assert_eq!(palette, state::Palette::catppuccin());
+
+        std::env::remove_var("GHOSTTY_CONFIG");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ghostty_theme_value_for_runtime_maps_names() {
+        let _guard = config_env_lock().lock().unwrap();
+        let dir = ghostty_test_dir("value");
+        let ghostty_config = dir.join("ghostty-config");
+        std::fs::write(&ghostty_config, "theme = Followed\n").unwrap();
+        std::env::set_var("GHOSTTY_CONFIG", &ghostty_config);
+
+        // Manual name pinned to a Ghostty theme resolves verbatim.
+        let mut config = Config::default();
+        config.theme.name = Some("ghostty:Some Theme".to_string());
+        let runtime = client_theme_runtime_from_config(&config);
+        assert_eq!(
+            ghostty_theme_value_for_runtime(&runtime, None).as_deref(),
+            Some("Some Theme")
+        );
+
+        // Builtins map to their Ghostty counterpart.
+        let mut config = Config::default();
+        config.theme.name = Some("nord".to_string());
+        let runtime = client_theme_runtime_from_config(&config);
+        assert_eq!(
+            ghostty_theme_value_for_runtime(&runtime, None).as_deref(),
+            Some("Nord")
+        );
+
+        // Bare `ghostty` follow expands to Ghostty's own configured theme,
+        // so the desired value already matches and nothing is written.
+        let mut config = Config::default();
+        config.theme.name = Some("ghostty".to_string());
+        let runtime = client_theme_runtime_from_config(&config);
+        assert_eq!(
+            ghostty_theme_value_for_runtime(&runtime, None).as_deref(),
+            Some("Followed")
+        );
+
+        // `terminal` claims no Ghostty theme — Ghostty is left alone.
+        let mut config = Config::default();
+        config.theme.name = Some("terminal".to_string());
+        let runtime = client_theme_runtime_from_config(&config);
+        assert_eq!(ghostty_theme_value_for_runtime(&runtime, None), None);
+
+        std::env::remove_var("GHOSTTY_CONFIG");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ghostty_theme_value_for_runtime_auto_switch_pairs() {
+        let _guard = config_env_lock().lock().unwrap();
+        let mut config = Config::default();
+        config.theme.auto_switch = true;
+        config.theme.dark_name = Some("nord".to_string());
+        config.theme.light_name = Some("solarized-light".to_string());
+        let runtime = client_theme_runtime_from_config(&config);
+        assert_eq!(
+            ghostty_theme_value_for_runtime(&runtime, None).as_deref(),
+            Some("dark:Nord,light:iTerm2 Solarized Light")
+        );
+
+        // One unmapped side degrades to the resolvable single theme.
+        let mut config = Config::default();
+        config.theme.auto_switch = true;
+        config.theme.dark_name = Some("nord".to_string());
+        config.theme.light_name = Some("terminal".to_string());
+        let runtime = client_theme_runtime_from_config(&config);
+        assert_eq!(
+            ghostty_theme_value_for_runtime(&runtime, None).as_deref(),
+            Some("Nord")
+        );
+    }
+
+    #[test]
+    fn ghostty_theme_name_for_appearance_picks_side() {
+        assert_eq!(
+            ghostty_theme_name_for_appearance("Nord", None).as_deref(),
+            Some("Nord")
+        );
+        assert_eq!(
+            ghostty_theme_name_for_appearance(
+                "dark:D,light:L",
+                Some(crate::terminal_theme::HostAppearance::Light)
+            )
+            .as_deref(),
+            Some("L")
+        );
+        assert_eq!(ghostty_theme_name_for_appearance("", None), None);
     }
 
     #[test]

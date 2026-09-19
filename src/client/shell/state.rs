@@ -408,16 +408,57 @@ impl ClientSettingsSection {
     }
 }
 
+/// A selectable entry in the settings theme list: either a built-in theme
+/// (`value` is the canonical name) or a Ghostty theme (`value` is
+/// `ghostty:<name>`).
+#[derive(Debug, Clone)]
+pub(super) struct ClientThemeChoice {
+    pub(super) label: String,
+    pub(super) value: String,
+}
+
+impl ClientThemeChoice {
+    pub(super) fn matches_query(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty() || self.label.to_lowercase().contains(&query)
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ClientSettingsOverlay {
     pub(super) section: ClientSettingsSection,
     pub(super) selected: usize,
     pub(super) original_theme_name: String,
     pub(super) original_palette: Palette,
+    pub(super) theme_choices: Vec<ClientThemeChoice>,
+    pub(super) query: TextEditor,
+    pub(super) search_focused: bool,
     pub(super) integrations: Vec<crate::api::schema::IntegrationInfo>,
     pub(super) integration_messages: Vec<String>,
     pub(super) loading_integrations: bool,
     pub(super) installing_integrations: bool,
+}
+
+impl ClientSettingsOverlay {
+    pub(super) fn filtered_theme_indices(&self) -> Vec<usize> {
+        self.theme_choices
+            .iter()
+            .enumerate()
+            .filter_map(|(index, choice)| {
+                choice.matches_query(self.query.as_str()).then_some(index)
+            })
+            .collect()
+    }
+
+    /// The theme choice under the cursor — the selected row when it is
+    /// visible in the filter, otherwise the first filtered row.
+    pub(super) fn selected_theme_index(&self) -> Option<usize> {
+        let filtered = self.filtered_theme_indices();
+        filtered
+            .contains(&self.selected)
+            .then_some(self.selected)
+            .or_else(|| filtered.first().copied())
+    }
 }
 
 #[derive(Debug)]
@@ -925,6 +966,10 @@ pub(crate) struct ClientShellState {
     pub(super) config_diagnostic: Option<String>,
     pub(super) endpoint_error: Option<String>,
     pub(super) endpoint_error_deadline: Option<std::time::Instant>,
+    /// Ghostty theme currently recoloring the host terminal via OSC preview
+    /// sequences (set while browsing the settings theme list). `Some` means
+    /// a cancel must emit OSC resets to restore the configured colors.
+    pub(super) ghostty_osc_theme: Option<String>,
     pub(super) dismissed_product_announcement: Option<(String, String)>,
 }
 
@@ -1088,6 +1133,7 @@ impl ClientShellState {
             local_config_diagnostic,
             endpoint_error: None,
             endpoint_error_deadline: None,
+            ghostty_osc_theme: None,
             dismissed_product_announcement: None,
         }
     }

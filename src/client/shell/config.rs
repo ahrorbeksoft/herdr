@@ -83,6 +83,7 @@ impl ClientShellState {
                         appearance,
                     );
                 }
+                self.sync_ghostty_theme();
                 if !self.sidebar_width_manual {
                     self.sidebar_width = self.config.sidebar_width;
                 }

@@ -129,33 +129,63 @@ pub(super) fn render_settings_overlay(
     let mut choice_hits = Vec::new();
     match settings.section {
         ClientSettingsSection::Theme => {
-            let visible = usize::from(content.height);
-            let scroll = settings.selected.saturating_sub(visible.saturating_sub(1));
-            for (visible_index, (index, name)) in crate::config::THEME_NAMES
-                .iter()
-                .enumerate()
-                .skip(scroll)
-                .take(visible)
-                .enumerate()
-            {
-                let rect = Rect::new(
-                    content.x,
-                    content.y + visible_index as u16,
-                    content.width,
-                    1,
+            let mut rows = content;
+            let filtering = settings.search_focused || !settings.query.as_str().is_empty();
+            if filtering {
+                put_text(
+                    buffer,
+                    rows.x,
+                    rows.y,
+                    rows.width,
+                    &format!(" /{}", settings.query.as_str()),
+                    Style::default()
+                        .fg(palette.accent)
+                        .bg(palette.panel_bg)
+                        .add_modifier(Modifier::BOLD),
                 );
+                rows.y += 1;
+                rows.height = rows.height.saturating_sub(1);
+            }
+            let filtered = settings.filtered_theme_indices();
+            let visible = usize::from(rows.height);
+            let position = filtered
+                .iter()
+                .position(|index| *index == settings.selected)
+                .unwrap_or(0);
+            let scroll = position.saturating_sub(visible.saturating_sub(1));
+            for (visible_index, index) in filtered.iter().skip(scroll).take(visible).enumerate() {
+                let choice = &settings.theme_choices[*index];
+                let rect = Rect::new(rows.x, rows.y + visible_index as u16, rows.width, 1);
+                let label = if choice
+                    .value
+                    .starts_with(crate::config::GHOSTTY_THEME_PREFIX)
+                {
+                    format!("{} · ghostty", choice.label)
+                } else {
+                    choice.label.clone()
+                };
                 draw_choice(
                     buffer,
                     rect,
-                    name,
-                    index == settings.selected,
-                    super::super::settings::normalized_theme_name(name)
+                    &label,
+                    *index == settings.selected,
+                    super::super::settings::normalized_theme_name(&choice.value)
                         == super::super::settings::normalized_theme_name(
                             &settings.original_theme_name,
                         ),
                     palette,
                 );
-                choice_hits.push((rect, index));
+                choice_hits.push((rect, *index));
+            }
+            if filtered.is_empty() {
+                put_text(
+                    buffer,
+                    rows.x,
+                    rows.y,
+                    rows.width,
+                    " no themes match",
+                    Style::default().fg(palette.overlay1).bg(palette.panel_bg),
+                );
             }
         }
         ClientSettingsSection::Indicators => {
@@ -234,12 +264,17 @@ pub(super) fn render_settings_overlay(
             .bg(palette.surface0)
             .add_modifier(Modifier::BOLD),
     );
+    let hint = if settings.section == ClientSettingsSection::Theme {
+        " ↑↓ select  tab section  type to filter"
+    } else {
+        " ↑↓ select  tab section"
+    };
     put_text(
         buffer,
         inner.x,
         inner.bottom().saturating_sub(2),
         inner.width,
-        " ↑↓ select  tab section",
+        hint,
         Style::default().fg(palette.overlay1).bg(palette.panel_bg),
     );
 
