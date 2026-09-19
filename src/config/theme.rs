@@ -86,11 +86,21 @@ impl ThemeConfig {
         .into_iter()
         .filter_map(|(field, value, fallback)| {
             let value = value?;
-            canonical_theme_name(value).is_none().then(|| {
-                format!(
+            if canonical_theme_name(value).is_some() {
+                return None;
+            }
+            match super::ghostty::ghostty_theme_ref(value) {
+                Some(None) => None,
+                Some(Some(name)) => (!super::ghostty::ghostty_theme_names()
+                    .iter()
+                    .any(|known| *known == name))
+                .then(|| {
+                    format!("unknown ghostty theme {field} = {value:?}; using {fallback:?}")
+                }),
+                None => Some(format!(
                     "unknown theme name {field} = {value:?}; using {fallback:?}; valid themes: {valid}"
-                )
-            })
+                )),
+            }
         })
         .collect()
     }
