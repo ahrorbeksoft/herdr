@@ -53,7 +53,7 @@ name = "ghostty"            # follow ghostty's configured theme, incl. dark:X,li
 # name = "ghostty:Catppuccin Mocha"   # or pin a specific ghostty theme by name
 ```
 
-- every ghostty theme found in ghostty's bundled and user theme directories shows up in the settings theme list, alongside the built-ins.
+- every ghostty theme found in ghostty's bundled and user theme directories shows up in the settings theme list, alongside the built-ins. just start typing to filter the list; `esc` leaves the filter box first and closes settings second.
 - browsing a theme in settings live-recolors the host terminal (background, foreground, cursor, selection, and the 16 ansi colors via osc 4/10/11/12/17/19), so you preview it instantly; cancelling resets everything.
 - applying a theme writes the `theme =` line in ghostty's config and sends ghostty `SIGUSR2` to reload it, so ghostty and herdr stay in lockstep.
 - `HERDR_GHOSTTY_THEMES_DIR` and `GHOSTTY_CONFIG` override where herdr looks for theme files and the ghostty config.

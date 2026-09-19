@@ -989,6 +989,54 @@ fn ghostty_theme_apply_writes_config() {
 }
 
 #[test]
+fn settings_theme_typeahead_filters_and_esc_unfocuses() {
+    let _guard = crate::config::test_config_env_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let dir = ghostty_test_dir("typeahead");
+    std::fs::write(dir.join("Zebra Night"), GHOSTTY_SAMPLE_THEME).unwrap();
+    std::env::set_var("HERDR_GHOSTTY_THEMES_DIR", &dir);
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.open_settings_overlay();
+    let press = |state: &mut ClientShellState, code| {
+        state.route_settings_key(
+            &crate::input::TerminalKey::new(code, KeyModifiers::NONE),
+            &mut ClientShellInput::default(),
+        )
+    };
+
+    // An unbound printable key opens the filter and starts the query.
+    for code in [KeyCode::Char('z'), KeyCode::Char('e'), KeyCode::Char('b')] {
+        press(&mut state, code);
+    }
+    {
+        let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_ref() else {
+            panic!("settings overlay should be open");
+        };
+        assert!(settings.search_focused);
+        assert_eq!(settings.query.as_str(), "zeb");
+        assert_eq!(settings.filtered_theme_indices().len(), 1);
+    }
+    // j/k still insert text while the filter is focused.
+    press(&mut state, KeyCode::Char('j'));
+    // First Esc only leaves the filter; the overlay stays open.
+    press(&mut state, KeyCode::Esc);
+    {
+        let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_ref() else {
+            panic!("settings overlay should still be open after Esc");
+        };
+        assert!(!settings.search_focused);
+    }
+    // Second Esc cancels the overlay.
+    press(&mut state, KeyCode::Esc);
+    assert!(state.overlay.is_none());
+
+    std::env::remove_var("HERDR_GHOSTTY_THEMES_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ghostty_builtin_preview_resets_when_unmapped() {
     let _guard = crate::config::test_config_env_lock()
         .lock()
