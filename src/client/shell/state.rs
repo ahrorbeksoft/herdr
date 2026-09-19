@@ -123,6 +123,9 @@ pub(super) struct ShellHitMap {
     pub(super) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
     pub(super) worktree_search: Rect,
     pub(super) worktree_rows: Vec<(Rect, usize)>,
+    pub(super) dev_server_popup: Rect,
+    pub(super) dev_server_search: Rect,
+    pub(super) dev_server_rows: Vec<(Rect, usize)>,
     pub(super) help_popup: Rect,
     pub(super) help_scrollbar: Rect,
     pub(super) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -286,6 +289,7 @@ pub(super) enum ClientShellOverlayKind {
     ContextMenu,
     GlobalMenu,
     Settings,
+    DevServers,
 }
 
 #[derive(Debug)]
@@ -547,6 +551,220 @@ pub(super) struct ClientWorktreeRemoveOverlay {
     pub(super) force_confirmation: bool,
 }
 
+#[derive(Debug)]
+pub(super) struct ClientDevServerEntry {
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) pid: u32,
+    pub(super) name: String,
+    pub(super) command: Option<String>,
+    pub(super) listeners: Vec<crate::api::schema::DevServerListener>,
+    pub(super) uptime_seconds: Option<u64>,
+    pub(super) pane_id: Option<String>,
+    pub(super) workspace_id: Option<String>,
+    pub(super) workspace_name: Option<String>,
+    pub(super) pane_title: Option<String>,
+    pub(super) cwd: Option<String>,
+}
+
+impl ClientDevServerEntry {
+    pub(super) fn from_server(
+        endpoint_id: ClientEndpointId,
+        entry: crate::api::schema::DevServerEntry,
+    ) -> Self {
+        Self {
+            endpoint_id,
+            pid: entry.pid,
+            name: entry.name,
+            command: entry.command,
+            listeners: entry.listeners,
+            uptime_seconds: entry.uptime_seconds,
+            pane_id: entry.pane_id,
+            workspace_id: entry.workspace_id,
+            workspace_name: entry.workspace_name,
+            pane_title: entry.pane_title,
+            cwd: entry.cwd,
+        }
+    }
+
+    pub(super) fn matches_query(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let ports = self
+            .listeners
+            .iter()
+            .map(|listener| format!("{}:{}", listener.address, listener.port))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "{} {} {} {} {} {} {} {} {}",
+            ports,
+            self.pid,
+            self.name,
+            self.command.as_deref().unwrap_or_default(),
+            self.pane_title.as_deref().unwrap_or_default(),
+            self.pane_id.as_deref().unwrap_or_default(),
+            self.workspace_name.as_deref().unwrap_or_default(),
+            self.workspace_id.as_deref().unwrap_or_default(),
+            self.cwd.as_deref().unwrap_or_default(),
+        )
+        .to_lowercase()
+        .contains(&query)
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum ClientDevServerSectionState {
+    Loading,
+    Offline,
+    Error(String),
+    Unsupported,
+    Ready(Vec<ClientDevServerEntry>),
+}
+
+#[derive(Debug)]
+pub(super) struct ClientDevServerSection {
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) label: String,
+    pub(super) status: ClientEndpointStatus,
+    pub(super) state: ClientDevServerSectionState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClientDevServerTermination {
+    /// A graceful kill request was sent; the refreshed list has not confirmed yet.
+    Sent,
+    /// A refreshed list still contains the process — the row can escalate.
+    StillRunning,
+}
+
+#[derive(Debug)]
+pub(super) struct ClientDevServersOverlay {
+    pub(super) sections: Vec<ClientDevServerSection>,
+    /// The highlighted row's stable identity. Lists refresh underneath the
+    /// selection; a positional index could silently retarget a termination,
+    /// so the cursor is the row's `(endpoint, pid)` key instead.
+    pub(super) selected: Option<(ClientEndpointId, u32)>,
+    pub(super) query: TextEditor,
+    pub(super) search_focused: bool,
+    pub(super) error: Option<String>,
+    pub(super) terminating: HashMap<(ClientEndpointId, u32), ClientDevServerTermination>,
+}
+
+impl ClientDevServersOverlay {
+    /// Flat `(section, entry)` pairs for every selectable row, in display order.
+    pub(super) fn filtered_rows(&self) -> Vec<(usize, usize)> {
+        self.sections
+            .iter()
+            .enumerate()
+            .flat_map(|(section_index, section)| {
+                let entries = match &section.state {
+                    ClientDevServerSectionState::Ready(entries) => entries.as_slice(),
+                    _ => &[],
+                };
+                entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(entry_index, entry)| {
+                        entry
+                            .matches_query(self.query.as_str())
+                            .then_some((section_index, entry_index))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub(super) fn entry_at(
+        &self,
+        section_index: usize,
+        entry_index: usize,
+    ) -> Option<&ClientDevServerEntry> {
+        match &self.sections.get(section_index)?.state {
+            ClientDevServerSectionState::Ready(entries) => entries.get(entry_index),
+            _ => None,
+        }
+    }
+
+    fn row_key(&self, section_index: usize, entry_index: usize) -> Option<(ClientEndpointId, u32)> {
+        self.entry_at(section_index, entry_index)
+            .map(|entry| (entry.endpoint_id.clone(), entry.pid))
+    }
+
+    /// Flat position of the highlighted row inside `filtered_rows()` — used by
+    /// render and mouse hit mapping.
+    pub(super) fn selected_flat_index(&self) -> Option<usize> {
+        let rows = self.filtered_rows();
+        self.selected
+            .as_ref()
+            .and_then(|(endpoint_id, pid)| {
+                rows.iter().position(|(section_index, entry_index)| {
+                    self.entry_at(*section_index, *entry_index)
+                        .is_some_and(|entry| &entry.endpoint_id == endpoint_id && entry.pid == *pid)
+                })
+            })
+            .or_else(|| (!rows.is_empty()).then_some(0))
+    }
+
+    /// `(section, entry)` under the cursor, falling back to the first filtered
+    /// row when the selected process left the list.
+    pub(super) fn selected_row(&self) -> Option<(usize, usize)> {
+        let rows = self.filtered_rows();
+        self.selected_flat_index()
+            .and_then(|flat| rows.get(flat).copied())
+    }
+
+    /// Select the row at `flat` inside `filtered_rows()`. Returns the key.
+    pub(super) fn select_flat_index(&mut self, flat: usize) -> Option<(ClientEndpointId, u32)> {
+        let key = self
+            .filtered_rows()
+            .get(flat)
+            .and_then(|(section, entry)| self.row_key(*section, *entry));
+        if let Some(key) = &key {
+            self.selected = Some(key.clone());
+        }
+        key
+    }
+
+    pub(super) fn move_selection(&mut self, delta: isize) {
+        let rows = self.filtered_rows();
+        if rows.is_empty() {
+            self.selected = None;
+            return;
+        }
+        let current = self.selected_flat_index().unwrap_or(0);
+        let next = (current as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
+        let key = self.row_key(rows[next].0, rows[next].1);
+        self.selected = key;
+    }
+
+    fn section_mut(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+    ) -> Option<&mut ClientDevServerSection> {
+        self.sections
+            .iter_mut()
+            .find(|section| &section.endpoint_id == endpoint_id)
+    }
+
+    pub(super) fn set_ready(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        entries: Vec<ClientDevServerEntry>,
+    ) {
+        if let Some(section) = self.section_mut(endpoint_id) {
+            section.state = ClientDevServerSectionState::Ready(entries);
+        }
+    }
+
+    pub(super) fn set_error(&mut self, endpoint_id: &ClientEndpointId, message: String) {
+        if let Some(section) = self.section_mut(endpoint_id) {
+            section.state = ClientDevServerSectionState::Error(message);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientContextMenuAction {
     Rename,
@@ -623,6 +841,7 @@ pub(super) enum ClientShellOverlay {
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
+    DevServers(ClientDevServersOverlay),
 }
 
 impl ClientShellOverlay {
@@ -641,6 +860,7 @@ impl ClientShellOverlay {
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::DevServers(_) => ClientShellOverlayKind::DevServers,
         }
     }
 }
@@ -703,6 +923,26 @@ pub(super) enum PendingEndpointKind {
         generation: u64,
         session_generation: u64,
     },
+    DevServerList {
+        endpoint_id: ClientEndpointId,
+    },
+    ProcessKill {
+        endpoint_id: ClientEndpointId,
+        pid: u32,
+    },
+}
+
+impl PendingEndpointKind {
+    /// Requests scoped to a concrete endpoint rather than the active one. These
+    /// keep working when the endpoint is not the presented surface.
+    pub(super) fn endpoint_id(&self) -> Option<&ClientEndpointId> {
+        match self {
+            Self::DevServerList { endpoint_id } | Self::ProcessKill { endpoint_id, .. } => {
+                Some(endpoint_id)
+            }
+            _ => None,
+        }
+    }
 }
 
 pub(super) struct PendingEndpointRequest {

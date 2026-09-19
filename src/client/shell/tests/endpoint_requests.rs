@@ -57,7 +57,7 @@ fn submit_worktree(mut state: ClientShellState) -> (ClientShellState, Vec<Client
     (state, outcome.actions)
 }
 
-fn request_id(actions: &[ClientShellAction]) -> &str {
+pub(super) fn request_id(actions: &[ClientShellAction]) -> &str {
     let [ClientShellAction::Endpoint { request, .. }] = actions else {
         panic!("expected one endpoint request");
     };
@@ -90,7 +90,7 @@ fn worktree_created_result() -> crate::api::schema::ResponseResult {
     .unwrap()
 }
 
-fn add_remote(state: &mut ClientShellState) -> ClientEndpointId {
+pub(super) fn add_remote(state: &mut ClientShellState) -> ClientEndpointId {
     let profile = crate::client::endpoint::SavedSshEndpoint {
         id: crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
         label: "Build".into(),

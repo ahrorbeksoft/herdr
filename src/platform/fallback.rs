@@ -221,6 +221,24 @@ pub fn session_processes(_child_pid: u32) -> Vec<u32> {
 pub fn signal_processes(_pids: &[u32], _signal: Signal) {}
 
 /// Unsupported platform stub.
+pub(crate) fn terminate_process(_pid: u32, _force: bool) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "terminating processes is not supported on this platform",
+    ))
+}
+
+/// Unsupported platform stub.
+pub(crate) fn process_table() -> Vec<super::ProcessEntry> {
+    Vec::new()
+}
+
+/// Unsupported platform stub.
+pub(crate) fn listening_tcp_sockets() -> Vec<super::ListeningSocket> {
+    Vec::new()
+}
+
+/// Unsupported platform stub.
 pub fn process_exists(_pid: u32) -> bool {
     false
 }

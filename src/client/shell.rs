@@ -9,6 +9,7 @@ mod composition;
 mod config;
 mod context_menu;
 mod copy_mode;
+mod dev_servers;
 mod endpoint_agent_state;
 mod endpoint_agents;
 mod endpoint_navigation;

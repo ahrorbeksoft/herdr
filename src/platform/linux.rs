@@ -774,6 +774,200 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
+/// Terminate a single process with SIGTERM, or SIGKILL when `force` is set.
+pub(crate) fn terminate_process(pid: u32, force: bool) -> std::io::Result<()> {
+    if pid == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "pid 0 cannot be terminated",
+        ));
+    }
+    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+    if unsafe { libc::kill(pid as i32, signal) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Snapshot of the process table from /proc: pid, parent, comm, cmdline, uptime.
+///
+/// This is a bounded one-shot scan for on-demand API use, not a render path.
+pub(crate) fn process_table() -> Vec<super::ProcessEntry> {
+    let system_uptime = proc_uptime_seconds();
+    let ticks_per_second = clock_ticks_per_second();
+    let mut entries = Vec::new();
+    let Ok(read_dir) = std::fs::read_dir("/proc") else {
+        return entries;
+    };
+    for entry in read_dir.flatten() {
+        let Some(pid) = numeric_file_name(&entry) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some((name, parent_pid, start_ticks)) = process_table_fields_from_stat(&stat) else {
+            continue;
+        };
+        let command = process_argv(pid).map(|argv| argv.join(" "));
+        let uptime_seconds = system_uptime.and_then(|uptime| {
+            let started_after_boot = start_ticks as f64 / ticks_per_second;
+            (uptime > started_after_boot).then_some((uptime - started_after_boot) as u64)
+        });
+        entries.push(super::ProcessEntry {
+            pid,
+            parent_pid,
+            name,
+            command,
+            uptime_seconds,
+        });
+    }
+    entries
+}
+
+/// Extract comm, ppid, and starttime from a `/proc/<pid>/stat` line.
+/// comm may contain spaces and parens, so fields are split at the last ')'.
+fn process_table_fields_from_stat(stat: &str) -> Option<(String, u32, u64)> {
+    let close = stat.rfind(')')?;
+    let comm = stat.get(1 + stat.find('(')?..close)?.to_string();
+    let rest = stat.get(close + 2..)?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // After (comm): state(0) ppid(1) ... starttime(19) — see proc(5).
+    let parent_pid: u32 = fields.get(1)?.parse().ok()?;
+    let start_ticks: u64 = fields.get(19)?.parse().ok()?;
+    Some((comm, parent_pid, start_ticks))
+}
+
+fn proc_uptime_seconds() -> Option<f64> {
+    let text = std::fs::read_to_string("/proc/uptime").ok()?;
+    text.split_whitespace().next()?.parse().ok()
+}
+
+fn clock_ticks_per_second() -> f64 {
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks > 0 {
+        ticks as f64
+    } else {
+        100.0
+    }
+}
+
+/// TCP sockets in LISTEN state, mapped from socket inode to owning pid via
+/// `/proc/net/tcp{,6}` and `/proc/<pid>/fd` symlinks.
+pub(crate) fn listening_tcp_sockets() -> Vec<super::ListeningSocket> {
+    let mut rows = Vec::new();
+    if let Ok(text) = std::fs::read_to_string("/proc/net/tcp") {
+        rows.extend(parse_proc_net_tcp(&text, false));
+    }
+    if let Ok(text) = std::fs::read_to_string("/proc/net/tcp6") {
+        rows.extend(parse_proc_net_tcp(&text, true));
+    }
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    let owners = socket_inode_owners();
+    let mut sockets = Vec::new();
+    let mut seen = HashSet::new();
+    for (inode, address, port) in rows {
+        let Some(pids) = owners.get(&inode) else {
+            continue;
+        };
+        for &pid in pids {
+            if seen.insert((pid, address.clone(), port)) {
+                sockets.push(crate::platform::ListeningSocket {
+                    pid,
+                    address: address.clone(),
+                    port,
+                });
+            }
+        }
+    }
+    sockets
+}
+
+/// Parse one `/proc/net/tcp`-style table into (inode, address, port) rows for
+/// sockets in LISTEN state (`st` == `0A`).
+fn parse_proc_net_tcp(text: &str, ipv6: bool) -> Vec<(u64, String, u16)> {
+    let mut rows = Vec::new();
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // sl local rem st tx:rx tr:tm retr uid timeout inode ...
+        if fields.len() < 10 || fields[3] != "0A" {
+            continue;
+        }
+        let Some((address_hex, port_hex)) = fields[1].split_once(':') else {
+            continue;
+        };
+        let Ok(port) = u16::from_str_radix(port_hex, 16) else {
+            continue;
+        };
+        let Some(address) = decode_proc_net_address(address_hex, ipv6) else {
+            continue;
+        };
+        let Ok(inode) = fields[9].parse::<u64>() else {
+            continue;
+        };
+        if inode == 0 {
+            continue;
+        }
+        rows.push((inode, address, port));
+    }
+    rows
+}
+
+/// `/proc/net/tcp` stores addresses as hex words in host byte order; each
+/// printed word converts to little-endian bytes before forming the IP text.
+fn decode_proc_net_address(hex: &str, ipv6: bool) -> Option<String> {
+    if ipv6 {
+        if hex.len() != 32 {
+            return None;
+        }
+        let mut bytes = [0u8; 16];
+        for i in 0..4 {
+            let word = u32::from_str_radix(hex.get(i * 8..i * 8 + 8)?, 16).ok()?;
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        Some(std::net::Ipv6Addr::from(bytes).to_string())
+    } else {
+        let word = u32::from_str_radix(hex, 16).ok()?;
+        Some(std::net::Ipv4Addr::from(word.to_le_bytes()).to_string())
+    }
+}
+
+/// Map socket inode -> owning pids by scanning `/proc/<pid>/fd` links.
+fn socket_inode_owners() -> std::collections::HashMap<u64, Vec<u32>> {
+    let mut owners: std::collections::HashMap<u64, Vec<u32>> = std::collections::HashMap::new();
+    let Ok(read_dir) = std::fs::read_dir("/proc") else {
+        return owners;
+    };
+    for entry in read_dir.flatten() {
+        let Some(pid) = numeric_file_name(&entry) else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let Some(name) = target.to_str() else {
+                continue;
+            };
+            let Some(inode) = name
+                .strip_prefix("socket:[")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|text| text.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            owners.entry(inode).or_default().push(pid);
+        }
+    }
+    owners
+}
+
 pub fn write_clipboard(bytes: &[u8]) -> bool {
     for command in clipboard_commands() {
         if run_clipboard_command(&command, bytes) {
@@ -2163,5 +2357,62 @@ mod tests {
         assert_eq!(argv[1], "-c");
         assert!(argv[2].contains("EDITOR:-vi"));
         assert!(argv[2].contains("/tmp/herdr scrollback.txt"));
+    }
+
+    #[test]
+    fn proc_net_tcp_parses_listen_rows_with_inodes() {
+        let text = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+                    \x20   0: 0100007F:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0\n\
+                    \x20   1: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 23456 1 0000000000000000 100 0 0 10 0\n\
+                    \x20   2: 0100007F:0539 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000        0 99999 1 0000000000000000 100 0 0 10 0\n";
+
+        let rows = parse_proc_net_tcp(text, false);
+
+        // Only st==0A rows; the TIME_WAIT/other-state row is skipped.
+        assert_eq!(
+            rows,
+            vec![
+                (12345, "127.0.0.1".to_string(), 3000),
+                (23456, "0.0.0.0".to_string(), 8080),
+            ]
+        );
+    }
+
+    #[test]
+    fn proc_net_tcp6_decodes_word_swapped_addresses() {
+        let text = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+                    \x20   0: 00000000000000000000000000000000:1F91 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 111 1 0000000000000000 100 0 0 10 0\n\
+                    \x20   1: 00000000000000000000000001000000:2329 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 222 1 0000000000000000 100 0 0 10 0\n";
+
+        let rows = parse_proc_net_tcp(text, true);
+
+        assert_eq!(
+            rows,
+            vec![
+                (111, "::".to_string(), 8081),
+                (222, "::1".to_string(), 9001),
+            ]
+        );
+    }
+
+    #[test]
+    fn proc_net_tcp_skips_malformed_rows() {
+        assert!(parse_proc_net_tcp("header\n   0: 0100007F 0A\n", false).is_empty());
+        assert!(parse_proc_net_tcp("header\n", false).is_empty());
+        assert!(parse_proc_net_tcp("", false).is_empty());
+    }
+
+    #[test]
+    fn stat_fields_split_at_last_paren_and_read_ppid() {
+        // comm contains spaces and parens; ppid/starttime follow the last ')'.
+        let stat = "4242 (weird )name) S 1000 4242 4242 0 -1 4194304 100 0 0 0 10 5 0 0 20 0 1 0 987654 12345 100 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
+
+        let (comm, ppid, start_ticks) = process_table_fields_from_stat(stat).unwrap();
+
+        assert_eq!(comm, "weird )name");
+        assert_eq!(ppid, 1000);
+        assert_eq!(start_ticks, 987654);
+        assert!(process_table_fields_from_stat("no parens").is_none());
+        assert!(process_table_fields_from_stat("1 (x) S").is_none());
     }
 }

@@ -405,6 +405,66 @@ impl ClientShellState {
         true
     }
 
+    /// Send a request to a specific endpoint — not necessarily the active one.
+    /// Used by overlays that fan out to every connected server. Returns false
+    /// without user-visible notices when the endpoint is offline, has no
+    /// snapshot, or does not advertise the method; callers present their own
+    /// per-section affordance for those cases.
+    pub(super) fn push_endpoint_method_for(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        method: crate::api::schema::Method,
+        kind: PendingEndpointKind,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let method_name = crate::api::api_method_name(&method).to_owned();
+        let Some(endpoint) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        else {
+            return false;
+        };
+        if endpoint.status != ClientEndpointStatus::Online {
+            return false;
+        }
+        if !endpoint
+            .methods
+            .as_ref()
+            .is_none_or(|methods| methods.contains(&method_name))
+        {
+            return false;
+        }
+        let Some(boot_id) = endpoint
+            .snapshot
+            .as_deref()
+            .map(|snapshot| snapshot.boot_id.clone())
+        else {
+            return false;
+        };
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let request_id = format!("client-shell:{request_id}");
+        self.pending_requests.insert(
+            request_id.clone(),
+            PendingEndpointRequest {
+                boot_id: boot_id.clone(),
+                method_name,
+                confirmation_workspace_id: None,
+                kind,
+            },
+        );
+        outcome.actions.push(ClientShellAction::Endpoint {
+            endpoint_id: endpoint_id.clone(),
+            boot_id,
+            request: Box::new(crate::api::schema::Request {
+                id: request_id,
+                method,
+            }),
+        });
+        true
+    }
+
     pub(crate) fn receive_endpoint_error(&mut self, message: String) -> bool {
         self.push_endpoint_notice(
             ClientEndpointNoticeKind::Rejected,
@@ -475,12 +535,17 @@ impl ClientShellState {
         let Some(pending) = self.pending_requests.remove(request_id) else {
             return (false, Vec::new());
         };
-        if pending.boot_id != boot_id
-            || self
-                .snapshot
-                .as_deref()
-                .is_none_or(|snapshot| snapshot.boot_id != boot_id)
-        {
+        // Endpoint-scoped requests check their own endpoint's boot; the rest
+        // still bind to the active endpoint's applied snapshot.
+        let pending_endpoint = pending
+            .kind
+            .endpoint_id()
+            .cloned()
+            .unwrap_or_else(|| self.active_endpoint_id.clone());
+        if pending.boot_id != boot_id || self.endpoint_boot_id(&pending_endpoint) != Some(boot_id) {
+            if pending.kind.endpoint_id().is_some() {
+                self.dev_servers_request_dropped(&pending_endpoint);
+            }
             return (false, Vec::new());
         }
         if let PendingEndpointKind::PaneLinkResolve { target } = pending.kind {
@@ -496,10 +561,14 @@ impl ClientShellState {
         }
         if let Err(error) = &result {
             let code = error.code.as_deref().unwrap_or("invalid_response");
-            if !matches!(
-                code,
-                "confirmation_required" | "stale_content" | "stale_target"
-            ) {
+            // Endpoint-scoped requests surface failures inside their overlay
+            // instead of stacking global notices for every connected server.
+            if pending.kind.endpoint_id().is_none()
+                && !matches!(
+                    code,
+                    "confirmation_required" | "stale_content" | "stale_target"
+                )
+            {
                 let (kind, notice_code, title, body) = match code {
                     "endpoint_timeout" => (
                         ClientEndpointNoticeKind::Timeout,
@@ -792,6 +861,12 @@ impl ClientShellState {
             kind @ (PendingEndpointKind::IntegrationList
             | PendingEndpointKind::IntegrationInstall) => {
                 return self.handle_settings_endpoint_result(kind, result);
+            }
+            kind @ (PendingEndpointKind::DevServerList { .. }
+            | PendingEndpointKind::ProcessKill { .. }) => {
+                let mut outcome = ClientShellInput::default();
+                let repaint = self.handle_dev_server_endpoint_result(kind, result, &mut outcome);
+                return (repaint || outcome.repaint, outcome.actions);
             }
             kind => {
                 let mut outcome = ClientShellInput::default();

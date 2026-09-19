@@ -34,8 +34,10 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.split",
     "pane.swap",
     "pane.zoom",
+    "process.kill",
     "product_announcement.dismiss",
     "release_notes.dismiss",
+    "server.dev_servers",
     "server.reload_config",
     "tab.close",
     "tab.create",
@@ -64,6 +66,14 @@ pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
 
 pub(crate) fn supports_client_shell_method(method: &Method) -> bool {
     supports_client_shell_method_name(crate::api::api_method_name(method))
+}
+
+/// Methods that read or act on server-owned runtime state rather than the
+/// presented surface. They stay available while the requesting client's shell
+/// surface is inactive, so background endpoints still answer fleet-wide views
+/// like the dev-servers overlay.
+pub(crate) fn client_shell_method_allows_inactive_surface(method: &Method) -> bool {
+    matches!(method, Method::ServerDevServers(_) | Method::ProcessKill(_))
 }
 
 pub(crate) fn error_response(id: String, code: &str, message: impl Into<String>) -> String {
@@ -291,6 +301,15 @@ mod tests {
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
+        );
+        // Freeze additive dev-server/process methods the same way.
+        assert_eq!(
+            actual.remove("process.kill").as_deref(),
+            Some("824a65e9201c3b6d7201e0158ac5a45280b2f66d711d33b460ea01f06c36c4b1")
+        );
+        assert_eq!(
+            actual.remove("server.dev_servers").as_deref(),
+            Some("6f3f2e6ece6cf71b6f2a1379a48742dd2725f526669be186b1833aedf09f9d7d")
         );
 
         assert_eq!(

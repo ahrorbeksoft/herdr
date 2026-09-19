@@ -305,6 +305,74 @@ fn integration_list_request_and_response_round_trip() {
 }
 
 #[test]
+fn server_dev_servers_request_and_response_round_trip() {
+    let request = Request {
+        id: "req_dev_servers".into(),
+        method: Method::ServerDevServers(EmptyParams::default()),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "server.dev_servers");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+
+    let response = SuccessResponse {
+        id: "req_dev_servers".into(),
+        result: ResponseResult::DevServerList {
+            servers: vec![DevServerEntry {
+                pid: 4242,
+                name: "node".into(),
+                command: Some("node server.js".into()),
+                listeners: vec![
+                    DevServerListener {
+                        address: "127.0.0.1".into(),
+                        port: 3000,
+                    },
+                    DevServerListener {
+                        address: "*".into(),
+                        port: 8080,
+                    },
+                ],
+                uptime_seconds: Some(61),
+                pane_id: Some("w1:p1".into()),
+                workspace_id: Some("w1".into()),
+                workspace_name: Some("app".into()),
+                pane_title: Some("dev".into()),
+                cwd: Some("/repo".into()),
+            }],
+        },
+    };
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["result"]["type"], "dev_server_list");
+    assert_eq!(json["result"]["servers"][0]["listeners"][1]["port"], 8080);
+    assert_eq!(
+        serde_json::from_value::<SuccessResponse>(json).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn process_kill_request_parses_with_force_defaulting_false() {
+    let json = r#"{"id":"req_kill","method":"process.kill","params":{"pid":4242}}"#;
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::ProcessKill(params) = &request.method else {
+        panic!("wrong method parsed");
+    };
+    assert_eq!(params.pid, 4242);
+    assert!(!params.force);
+
+    let forced = Request {
+        id: "req_kill_force".into(),
+        method: Method::ProcessKill(ProcessKillParams {
+            pid: 4242,
+            force: true,
+        }),
+    };
+    let json = serde_json::to_value(&forced).unwrap();
+    assert_eq!(json["method"], "process.kill");
+    assert_eq!(json["params"]["force"], true);
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), forced);
+}
+
+#[test]
 fn command_invoke_request_round_trips_without_command_text() {
     let request = Request {
         id: "req_command".into(),

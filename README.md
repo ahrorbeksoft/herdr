@@ -72,6 +72,15 @@ backend = "cow"             # default: "git"
 - removing a worktree runs `cow remove`. the `worktrees.directory` option and custom checkout paths do not apply to this backend.
 - requires the `cow` cli on `PATH` and an apfs volume. `HERDR_COW_BIN` and `HERDR_COW_DIR` override the executable and the pastures root.
 
+### dev servers window
+
+the `menu` button gains a `dev servers` item that lists every tcp listener owned by a pane's process tree, across all connected machines grouped by endpoint.
+
+- each row shows the listening ports, pid, process name, the workspace/pane it belongs to, and its working directory.
+- `enter`/`d` sends sigterm; if the process survives the refresh, the row escalates to a force kill (`x`, sigkill). kills are scope-checked server-side — only pids inside a pane's process tree can be terminated.
+- endpoints running an older herdr without the `server.dev_servers` method show an "update required" section instead of failing the whole view.
+- also available to agents and scripts over the socket api: `server.dev_servers` and `process.kill`.
+
 ## install
 
 ```bash

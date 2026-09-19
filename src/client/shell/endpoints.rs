@@ -124,6 +124,7 @@ impl ClientShellState {
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
         }
+        self.dev_servers_endpoint_disconnected(endpoint_id);
     }
 
     pub(crate) fn set_endpoint_status(
@@ -142,15 +143,25 @@ impl ClientShellState {
 
     pub(crate) fn mark_endpoint_disconnected(&mut self, endpoint_id: &ClientEndpointId) {
         self.set_endpoint_status(endpoint_id, ClientEndpointStatus::Reconnecting);
-        if endpoint_id == &self.active_endpoint_id {
-            let pending = self.pending_requests.keys().cloned().collect::<Vec<_>>();
-            for request_id in pending {
-                self.cancel_endpoint_request(&request_id);
-            }
+        let active = endpoint_id == &self.active_endpoint_id;
+        let pending = self
+            .pending_requests
+            .iter()
+            .filter(|(_, pending)| match pending.kind.endpoint_id() {
+                Some(target) => target == endpoint_id,
+                None => active,
+            })
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in pending {
+            self.cancel_endpoint_request(&request_id);
+        }
+        if active {
             self.pending_integration_installs = 0;
             self.pane_scroll_in_flight.clear();
             self.pane_scroll_queued.clear();
         }
+        self.dev_servers_endpoint_disconnected(endpoint_id);
     }
 
     pub(crate) fn set_endpoint_agent_view_projection_supported(
@@ -436,6 +447,19 @@ impl ClientShellState {
 
     pub(crate) fn endpoint_is_active(&self, endpoint_id: &ClientEndpointId) -> bool {
         &self.active_endpoint_id == endpoint_id
+    }
+
+    /// True when the pending request was scoped to `endpoint_id` explicitly
+    /// (e.g. dev-server fan-out) rather than implicitly to the active endpoint.
+    /// Scoped requests stay valid while the endpoint is not presented.
+    pub(crate) fn pending_request_targets_endpoint(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        request_id: &str,
+    ) -> bool {
+        self.pending_requests
+            .get(request_id)
+            .is_some_and(|pending| pending.kind.endpoint_id() == Some(endpoint_id))
     }
 
     pub(crate) fn multi_endpoint_active(&self) -> bool {

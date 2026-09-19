@@ -15,6 +15,7 @@ use super::plugins::{
     InstalledPluginInfo, PluginActionInfo, PluginCommandLogInfo, PluginInvocationContext,
     PluginPaneInfo,
 };
+use super::processes::DevServerEntry;
 use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
@@ -231,6 +232,9 @@ pub enum ResponseResult {
     },
     IntegrationList {
         integrations: Vec<super::integrations::IntegrationInfo>,
+    },
+    DevServerList {
+        servers: Vec<DevServerEntry>,
     },
     IntegrationInstall {
         target: IntegrationTarget,

@@ -65,7 +65,11 @@ impl HeadlessServer {
             self.send_to_client(client_id, message);
             return false;
         }
-        if !surface_active {
+        if !surface_active
+            && !crate::server::client_commands::client_shell_method_allows_inactive_surface(
+                &request.method,
+            )
+        {
             let message = crate::server::client_commands::error_message(
                 boot_id,
                 request_id,

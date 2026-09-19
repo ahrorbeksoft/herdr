@@ -25,6 +25,24 @@ pub enum Signal {
     Kill,
 }
 
+/// A TCP socket in LISTEN state together with the process that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListeningSocket {
+    pub pid: u32,
+    pub address: String,
+    pub port: u16,
+}
+
+/// One row of the platform process table used for pane-tree discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessEntry {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub name: String,
+    pub command: Option<String>,
+    pub uptime_seconds: Option<u64>,
+}
+
 /// Why a pane runtime ended, before application persistence policy is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildExitReason {

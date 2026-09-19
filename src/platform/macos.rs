@@ -1144,6 +1144,113 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
+/// Terminate a single process with SIGTERM, or SIGKILL when `force` is set.
+pub(crate) fn terminate_process(pid: u32, force: bool) -> std::io::Result<()> {
+    if pid == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "pid 0 cannot be terminated",
+        ));
+    }
+    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+    if unsafe { libc::kill(pid as libc::c_int, signal) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Snapshot of the process table: pid, parent, name, argv, and uptime.
+///
+/// `KERN_PROCARGS2` is queried per process, which is a bounded one-shot cost
+/// appropriate for on-demand API scans (not render paths).
+pub(crate) fn process_table() -> Vec<super::ProcessEntry> {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    all_pids()
+        .into_iter()
+        .filter_map(|pid| {
+            let info = process_bsdinfo(pid)?;
+            Some(super::ProcessEntry {
+                pid,
+                parent_pid: info.pbi_ppid,
+                name: comm_from_bsdinfo(&info).unwrap_or_default(),
+                command: process_argv(pid).map(|argv| argv.join(" ")),
+                uptime_seconds: now_unix.checked_sub(info.pbi_start_tvsec),
+            })
+        })
+        .collect()
+}
+
+const LSOF_LISTEN_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+
+/// TCP sockets in LISTEN state, discovered via `lsof -F` machine-readable output.
+pub(crate) fn listening_tcp_sockets() -> Vec<super::ListeningSocket> {
+    // -Fpn emits only pid and name fields; -nP keeps hosts/ports numeric.
+    let mut child = match Command::new("/usr/sbin/lsof")
+        .args(["-Fpn", "-nP", "-iTCP", "-sTCP:LISTEN"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Vec::new(),
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Vec::new();
+    };
+    let read = read_limited_reader(stdout, LSOF_LISTEN_OUTPUT_LIMIT);
+    let status = child.wait();
+    let output = match (read, status) {
+        (Ok(LimitedRead::Complete(bytes)), Ok(status)) if status.success() => bytes,
+        _ => return Vec::new(),
+    };
+    parse_lsof_listen_output(&String::from_utf8_lossy(&output))
+}
+
+/// Parse `lsof -Fpn` output: `p<pid>` records introduce per-process groups and
+/// `n<name>` lines carry socket names like `*:3000`, `127.0.0.1:8080`, or
+/// `[::1]:9000`.
+fn parse_lsof_listen_output(output: &str) -> Vec<super::ListeningSocket> {
+    let mut sockets = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut current_pid = None;
+    for line in output.lines() {
+        let (field, value) = line.split_at(line.len().min(1));
+        match field {
+            "p" => current_pid = value.parse::<u32>().ok(),
+            "n" => {
+                let Some(pid) = current_pid else {
+                    continue;
+                };
+                let Some((address, port)) = parse_lsof_socket_name(value) else {
+                    continue;
+                };
+                if seen.insert((pid, address.clone(), port)) {
+                    sockets.push(crate::platform::ListeningSocket { pid, address, port });
+                }
+            }
+            _ => {}
+        }
+    }
+    sockets
+}
+
+fn parse_lsof_socket_name(name: &str) -> Option<(String, u16)> {
+    // Strip a `->peer` suffix if one ever appears on a listener row.
+    let name = name.split("->").next()?;
+    let (address, port) = name.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    if address.is_empty() {
+        return None;
+    }
+    Some((address.to_string(), port))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1363,5 +1470,46 @@ printf '%s\n' "$@" > "$HERDR_NOTIFY_ARGS"
         assert_eq!(argv[1], "-c");
         assert!(argv[2].contains("EDITOR:-vi"));
         assert!(argv[2].contains("/tmp/herdr scrollback.txt"));
+    }
+
+    #[test]
+    fn lsof_field_output_parses_listen_sockets_per_process() {
+        let output =
+            "p1234\nn*:3000\nn127.0.0.1:8080\np4321\nn[::1]:9000\nn[::1]:9000\np77\nn*:http\n";
+
+        let sockets = parse_lsof_listen_output(output);
+
+        assert_eq!(
+            sockets,
+            vec![
+                crate::platform::ListeningSocket {
+                    pid: 1234,
+                    address: "*".into(),
+                    port: 3000,
+                },
+                crate::platform::ListeningSocket {
+                    pid: 1234,
+                    address: "127.0.0.1".into(),
+                    port: 8080,
+                },
+                // Duplicate fd rows for one socket collapse to a single entry.
+                crate::platform::ListeningSocket {
+                    pid: 4321,
+                    address: "[::1]".into(),
+                    port: 9000,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lsof_field_output_skips_names_without_numeric_ports() {
+        assert!(parse_lsof_listen_output("p1\nnlocalhost:http\n").is_empty());
+        assert!(parse_lsof_listen_output("n*:3000\n").is_empty());
+        assert!(parse_lsof_listen_output("p1\nnno-colon\n").is_empty());
+        assert_eq!(
+            parse_lsof_socket_name("*:3000->127.0.0.1:50000"),
+            Some(("*".into(), 3000))
+        );
     }
 }

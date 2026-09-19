@@ -1651,6 +1651,63 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::DevServers(_))) {
+            let row_hit = self
+                .hits
+                .dev_server_rows
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+                .copied();
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some((_, flat)) = row_hit {
+                        self.dev_servers_pointer_row(flat, false, outcome);
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.move_dev_servers_selection(-3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.move_dev_servers_selection(3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if super::contains(self.hits.overlay_cancel, point) {
+                        let search_focused = matches!(
+                            self.overlay,
+                            Some(ClientShellOverlay::DevServers(ClientDevServersOverlay {
+                                search_focused: true,
+                                ..
+                            }))
+                        );
+                        if search_focused {
+                            if let Some(ClientShellOverlay::DevServers(overlay)) =
+                                self.overlay.as_mut()
+                            {
+                                overlay.search_focused = false;
+                            }
+                        } else {
+                            self.overlay = None;
+                        }
+                        outcome.repaint = true;
+                    } else if super::contains(self.hits.dev_server_search, point) {
+                        if let Some(ClientShellOverlay::DevServers(overlay)) = self.overlay.as_mut()
+                        {
+                            overlay.search_focused = true;
+                        }
+                        outcome.repaint = true;
+                    } else if let Some((_, flat)) = row_hit {
+                        self.dev_servers_pointer_row(flat, true, outcome);
+                    } else if !super::contains(self.hits.dev_server_popup, point) {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.overlay.is_some() {
             if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
                 return;

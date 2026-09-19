@@ -3892,6 +3892,24 @@
             }
           ]
         },
+        "ProcessKillParams": {
+          "properties": {
+            "force": {
+              "default": false,
+              "description": "Send SIGKILL instead of SIGTERM on Unix; always a hard kill on Windows.",
+              "type": "boolean"
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pid"
+          ],
+          "type": "object"
+        },
         "ProductAnnouncementDismissParams": {
           "properties": {
             "id": {
@@ -4831,6 +4849,22 @@
           "properties": {
             "method": {
               "const": "server.reload_agent_manifests",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "server.dev_servers",
               "type": "string"
             },
             "params": {
@@ -6110,6 +6144,22 @@
         {
           "properties": {
             "method": {
+              "const": "process.kill",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProcessKillParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "popup.close",
               "type": "string"
             },
@@ -6864,6 +6914,94 @@
             "failed"
           ],
           "type": "string"
+        },
+        "DevServerEntry": {
+          "description": "A process listening on TCP ports inside a pane's process tree.",
+          "properties": {
+            "command": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "listeners": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/DevServerListener"
+              },
+              "type": "array"
+            },
+            "name": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "uptime_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pid",
+            "name",
+            "listeners"
+          ],
+          "type": "object"
+        },
+        "DevServerListener": {
+          "description": "A single TCP listen socket owned by a dev-server process.",
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "address",
+            "port"
+          ],
+          "type": "object"
         },
         "EventData": {
           "oneOf": [
@@ -10194,6 +10332,25 @@
               "required": [
                 "type",
                 "integrations"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "servers": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/DevServerEntry"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "dev_server_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "servers"
               ],
               "type": "object"
             },

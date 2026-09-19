@@ -266,6 +266,19 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             highlighted: 0,
         }),
         ClientShellOverlay::GlobalMenu(ClientGlobalMenuOverlay { highlighted: 0 }),
+        ClientShellOverlay::DevServers(ClientDevServersOverlay {
+            sections: vec![ClientDevServerSection {
+                endpoint_id: crate::client::endpoint::ClientEndpointId::Local,
+                label: "Local".into(),
+                status: ClientEndpointStatus::Online,
+                state: ClientDevServerSectionState::Ready(Vec::new()),
+            }],
+            selected: None,
+            query: TextEditor::default(),
+            search_focused: false,
+            error: None,
+            terminating: HashMap::new(),
+        }),
         ClientShellOverlay::Settings(ClientSettingsOverlay {
             section: ClientSettingsSection::Theme,
             selected: 0,

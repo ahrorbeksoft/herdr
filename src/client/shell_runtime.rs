@@ -10,6 +10,9 @@ pub(super) fn dispatch_client_shell_actions(
 ) -> Result<(Vec<crossterm::event::MouseEvent>, bool), ClientError> {
     let mut replay_mouse = Vec::new();
     let mut repaint = false;
+    // Endpoint-scoped requests (e.g. the dev-servers overlay fan-out) ride
+    // their own command lane and must not wait for the presented surface.
+    let mut scoped_endpoints: Vec<endpoint::ClientEndpointId> = Vec::new();
     for action in actions {
         match action {
             shell::ClientShellAction::Endpoint {
@@ -17,10 +20,23 @@ pub(super) fn dispatch_client_shell_actions(
                 boot_id,
                 request,
             } => {
-                if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
-                    endpoints.active_id() == &endpoint_id && endpoints.active_surface_available()
-                }) {
-                    endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
+                let endpoint_scoped = shell.as_deref().is_some_and(|shell| {
+                    shell.pending_request_targets_endpoint(&endpoint_id, &request.id)
+                });
+                let connected = endpoints.connection(&endpoint_id).is_some();
+                let deliverable = connected
+                    && (endpoint_scoped
+                        || (endpoints.active_id() == &endpoint_id
+                            && endpoints.active_surface_available()));
+                if deliverable {
+                    let generation = endpoints
+                        .connection(&endpoint_id)
+                        .map(|connection| connection.generation)
+                        .expect("checked endpoint connection");
+                    if endpoint_scoped && !scoped_endpoints.contains(&endpoint_id) {
+                        scoped_endpoints.push(endpoint_id.clone());
+                    }
+                    endpoint_commands.enqueue(endpoint_id, generation, boot_id, request);
                 } else if let Some(shell) = shell.as_deref_mut() {
                     repaint |= shell.cancel_endpoint_request(&request.id);
                 }
@@ -53,6 +69,17 @@ pub(super) fn dispatch_client_shell_actions(
                     ?action,
                     "client shell action awaits its presentation family"
                 );
+            }
+        }
+    }
+    // Scoped lanes drain independently of which endpoint is presented. Their
+    // requests are server-scoped (advertised, boot-validated), so an inactive
+    // surface does not make the peer reject them.
+    for endpoint_id in scoped_endpoints {
+        let cancelled = endpoint_commands.send_next(&endpoint_id, endpoints);
+        if let Some(shell) = shell.as_deref_mut() {
+            for request_id in cancelled {
+                repaint |= shell.cancel_endpoint_request(&request_id);
             }
         }
     }

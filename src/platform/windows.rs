@@ -354,7 +354,8 @@ use windows_sys::{
                 OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread,
                 TerminateProcess, CREATE_NO_WINDOW, CREATE_SUSPENDED, DETACHED_PROCESS,
                 PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, THREAD_SUSPEND_RESUME,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, PROCESS_VM_READ,
+                THREAD_SUSPEND_RESUME,
             },
         },
         UI::{
@@ -2254,6 +2255,99 @@ pub fn process_exists(pid: u32) -> bool {
     let mut exit_code = 0;
     let ok = unsafe { GetExitCodeProcess(process.0, &mut exit_code) } != 0;
     ok && exit_code == STILL_ACTIVE
+}
+
+/// Terminate a process. Windows has no graceful signal equivalent, so `force`
+/// only documents intent: TerminateProcess always performs a hard kill.
+pub(crate) fn terminate_process(pid: u32, _force: bool) -> std::io::Result<()> {
+    let Some(process) = ProcessHandle::open(pid, PROCESS_TERMINATE) else {
+        return Err(std::io::Error::last_os_error());
+    };
+    if unsafe { TerminateProcess(process.0, 1) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Snapshot of the process table from a ToolHelp snapshot plus a per-process
+/// command-line/creation-time read. The per-process reads are bounded and only
+/// run on explicit API scans, never on render paths.
+pub(crate) fn process_table() -> Vec<super::ProcessEntry> {
+    let now = filetime_now();
+    snapshot_processes()
+        .iter()
+        .map(|entry| {
+            let command = entry.command();
+            super::ProcessEntry {
+                pid: entry.pid,
+                parent_pid: entry.parent_pid,
+                name: entry.name.clone(),
+                command: command.cmdline.clone(),
+                uptime_seconds: command
+                    .creation_time
+                    .and_then(|created| now.checked_sub(created))
+                    .map(|elapsed| elapsed / 10_000_000),
+            }
+        })
+        .collect()
+}
+
+/// FILETIME ticks (100ns since 1601-01-01) for the current instant.
+fn filetime_now() -> u64 {
+    const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+    let since_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    UNIX_EPOCH_AS_FILETIME + since_unix.as_nanos() as u64 / 100
+}
+
+/// TCP sockets in LISTENING state, discovered by parsing `netstat -ano -p tcp`.
+/// The kernel IP helper table APIs are not in the enabled windows-sys feature
+/// set, so netstat text output is the portable fallback.
+pub(crate) fn listening_tcp_sockets() -> Vec<super::ListeningSocket> {
+    let Ok(output) = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_netstat_tcp_listen(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Parse `netstat -ano -p tcp` rows like
+/// `  TCP    127.0.0.1:3000   0.0.0.0:0   LISTENING   1234`.
+fn parse_netstat_tcp_listen(text: &str) -> Vec<super::ListeningSocket> {
+    let mut sockets = Vec::new();
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // proto local foreign state pid
+        if fields.len() != 5 || fields[0] != "TCP" || fields[3] != "LISTENING" {
+            continue;
+        }
+        let Some((address, port_text)) = fields[1].rsplit_once(':') else {
+            continue;
+        };
+        let (Ok(port), Ok(pid)) = (port_text.parse::<u16>(), fields[4].parse::<u32>()) else {
+            continue;
+        };
+        if address.is_empty() {
+            continue;
+        }
+        if seen.insert((pid, address.to_string(), port)) {
+            sockets.push(crate::platform::ListeningSocket {
+                pid,
+                address: address.to_string(),
+                port,
+            });
+        }
+    }
+    sockets
 }
 
 pub fn write_clipboard(bytes: &[u8]) -> bool {
@@ -4486,5 +4580,43 @@ mod tests {
                 "second event is key-up"
             );
         }
+    }
+
+    #[test]
+    fn netstat_output_parses_tcp_listening_rows() {
+        let text = "\
+Active Connections
+
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:3000           0.0.0.0:0              LISTENING       1234
+  TCP    127.0.0.1:8080         0.0.0.0:0              LISTENING       1234
+  TCP    [::]:9000              [::]:0                 LISTENING       5678
+  TCP    192.168.1.5:51000      20.0.0.1:443           ESTABLISHED     9999
+  UDP    0.0.0.0:5353           *:*                                    4321
+";
+
+        let sockets = parse_netstat_tcp_listen(text);
+
+        assert_eq!(
+            sockets,
+            vec![
+                crate::platform::ListeningSocket {
+                    pid: 1234,
+                    address: "0.0.0.0".into(),
+                    port: 3000,
+                },
+                crate::platform::ListeningSocket {
+                    pid: 1234,
+                    address: "127.0.0.1".into(),
+                    port: 8080,
+                },
+                crate::platform::ListeningSocket {
+                    pid: 5678,
+                    address: "[::]".into(),
+                    port: 9000,
+                },
+            ]
+        );
+        assert!(parse_netstat_tcp_listen("").is_empty());
     }
 }

@@ -952,6 +952,9 @@ impl App {
                     },
                 }
             }
+            Method::ServerDevServers(_) => {
+                return self.handle_server_dev_servers(request.id);
+            }
             Method::NotificationShow(params) => {
                 return self.handle_notification_show(request.id, params);
             }
@@ -1174,6 +1177,9 @@ impl App {
                 return self.handle_pane_send_input(request.id, params);
             }
             Method::PaneClose(target) => return self.handle_pane_close(request.id, target),
+            Method::ProcessKill(params) => {
+                return self.handle_process_kill(request.id, params);
+            }
             Method::PopupClose(_) => {
                 return if self.close_popup_pane() {
                     responses::encode_success(request.id, ResponseResult::Ok {})
