@@ -1139,6 +1139,9 @@ impl ClientShellState {
                 pane_id: focused_pane,
                 mode: PaneZoomMode::Toggle,
             })),
+            KeybindAction::ClearPane => Some(Method::PaneClear(PaneTarget {
+                pane_id: focused_pane?,
+            })),
             KeybindAction::EditScrollback => Some(Method::PaneEditScrollback(PaneTarget {
                 pane_id: focused_pane?,
             })),
