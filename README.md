@@ -39,6 +39,39 @@ https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
 
 ---
 
+## fork additions
+
+this fork carries two features on top of upstream [herdrdev/herdr](https://github.com/herdrdev/herdr):
+
+### ghostty theme sync
+
+herdr can derive its whole ui palette from the theme ghostty is running, and write your pick back to ghostty.
+
+```toml
+[theme]
+name = "ghostty"            # follow ghostty's configured theme, incl. dark:X,light:Y splits
+# name = "ghostty:Catppuccin Mocha"   # or pin a specific ghostty theme by name
+```
+
+- every ghostty theme found in ghostty's bundled and user theme directories shows up in the settings theme list, alongside the built-ins.
+- browsing a theme in settings live-recolors the host terminal (background, foreground, cursor, selection, and the 16 ansi colors via osc 4/10/11/12/17/19), so you preview it instantly; cancelling resets everything.
+- applying a theme writes the `theme =` line in ghostty's config and sends ghostty `SIGUSR2` to reload it, so ghostty and herdr stay in lockstep.
+- `HERDR_GHOSTTY_THEMES_DIR` and `GHOSTTY_CONFIG` override where herdr looks for theme files and the ghostty config.
+
+### cow worktree backend (macos)
+
+worktree actions can create [cow](https://github.com/joeinnes/cow) apfs pastures instead of linked git worktrees.
+
+```toml
+[worktrees]
+backend = "cow"             # default: "git"
+```
+
+- `New worktree` / `Open worktree...` on a git workspace row run `cow` under the hood; checkouts land in `~/.cow/pastures/<repo>/<branch-slug>`.
+- pastures are full copy-on-write clones, so they get their own untracked files, build caches, and `node_modules` for free.
+- removing a worktree runs `cow remove`. the `worktrees.directory` option and custom checkout paths do not apply to this backend.
+- requires the `cow` cli on `PATH` and an apfs volume. `HERDR_COW_BIN` and `HERDR_COW_DIR` override the executable and the pastures root.
+
 ## install
 
 ```bash
