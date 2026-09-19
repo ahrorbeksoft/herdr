@@ -92,7 +92,7 @@ herdr pane read w1:p2 --source recent --lines 50
 
 | 领域 | 方法 |
 | --- | --- |
-| 服务器 | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
+| 服务器 | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests`、`server.dev_servers` |
 | 通知 | `notification.show` |
 | 客户端 | `client.window_title.set`、`client.window_title.clear` |
 | 会话 | `session.snapshot` |
@@ -100,6 +100,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
 | 标签页 | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.move`、`tab.close` |
 | 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
+| 进程 | `process.kill` |
 | 弹窗 | `popup.close` |
 | 布局 | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
 | 智能体 | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start` |
@@ -300,6 +301,16 @@ Worktree 方法把 Git 检出作为 Herdr 工作区管理。`worktree.create` �
 Worktree 命令也发出生命周期事件。`worktree.create` 发出 `workspace.created`、`tab.created`、`pane.created` 和 `worktree.created`。`worktree.open` 发出 `worktree.opened`,并在打开新的 Herdr 工作区时同时发出工作区/标签页/窗格创建事件。`worktree.remove` 发出 `worktree.removed`;如果关联的工作区仍然打开,还会发出 `workspace.closed`。
 
 当关联的 worktree 工作区仍然打开时，父工作区只有在 `workspace.close` 的 params 中包含 `"close_group": true` 时才会被关闭；缺少显式关闭组意图时会返回 `workspace_group_close_required`。显式关闭组时，每个被关闭的工作区都会发出一个 `workspace.closed` 事件。
+
+`server.dev_servers` 列出由窗格进程树中的进程所拥有的 TCP 监听器 — 与 dev servers 窗口背后的数据相同。它没有参数。响应为 `type: "dev_server_list"`，带 `servers` 数组；每个条目报告 `pid`、`name`、由 `address`/`port` 对组成的 `listeners`，以及可选的 `command`、`uptime_seconds`、`pane_id`、`workspace_id`、`workspace_name`、`pane_title` 和 `cwd`。
+
+```json
+{"id":"req_dev_servers","method":"server.dev_servers","params":{}}
+{"id":"req_kill","method":"process.kill","params":{"pid":4242}}
+{"id":"req_kill_force","method":"process.kill","params":{"pid":4242,"force":true}}
+```
+
+`process.kill` 仅在 pid 位于窗格进程树内时将其终止。作用域在每个请求时重新计算，位于窗格树之外的 pid 会在发送任何信号前被 `process_out_of_scope` 拒绝，因此该方法无法终止任意进程。`force` 默认为 `false`（Unix 上发送 SIGTERM）；`true` 发送 SIGKILL，Windows 上始终是强制终止。响应为 `type: "ok"`；信号发送失败时返回 `terminate_failed`。
 
 ## 智能体视图查询
 

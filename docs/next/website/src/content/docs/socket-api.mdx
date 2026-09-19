@@ -96,7 +96,7 @@ Raw socket method names use dot notation:
 
 | Area | Methods |
 | --- | --- |
-| Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
+| Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests`, `server.dev_servers` |
 | Notification | `notification.show` |
 | Client | `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
@@ -104,6 +104,7 @@ Raw socket method names use dot notation:
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Process | `process.kill` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -414,6 +415,16 @@ Use at most one of `workspace_id` or `cwd` for `worktree.list`, `worktree.create
 Worktree commands also emit lifecycle events. `worktree.create` emits `workspace.created`, `tab.created`, `pane.created`, and `worktree.created`. `worktree.open` emits `worktree.opened`, and it also emits workspace/tab/pane creation events when it opens a new Herdr workspace. `worktree.remove` emits `worktree.removed`; if the linked workspace is still open, it also emits `workspace.closed`.
 
 `workspace.close` rejects closing a primary workspace while linked-worktree workspaces are open unless its params include `"close_group": true`, returning `workspace_group_close_required` when explicit group intent is missing. An explicit group close emits one `workspace.closed` event for each workspace it closes.
+
+`server.dev_servers` lists TCP listeners owned by processes inside pane process trees — the same data behind the dev servers window. It takes no params. The response is `type: "dev_server_list"` with a `servers` array; each entry reports `pid`, `name`, its `listeners` as `address`/`port` pairs, and optional `command`, `uptime_seconds`, `pane_id`, `workspace_id`, `workspace_name`, `pane_title`, and `cwd`.
+
+```json
+{"id":"req_dev_servers","method":"server.dev_servers","params":{}}
+{"id":"req_kill","method":"process.kill","params":{"pid":4242}}
+{"id":"req_kill_force","method":"process.kill","params":{"pid":4242,"force":true}}
+```
+
+`process.kill` terminates a pid only while it sits inside a pane's process tree. The scope is recomputed per request, and pids outside pane trees are refused with `process_out_of_scope` before any signal is sent, so the method cannot terminate arbitrary processes. `force` defaults to `false`, which sends SIGTERM on Unix; `true` sends SIGKILL, and Windows always performs a hard kill. The response is `type: "ok"`; a failed signal returns `terminate_failed`.
 
 ## Agent view queries
 

@@ -92,7 +92,7 @@ herdr pane read w1:p2 --source recent --lines 50
 
 | 領域 | メソッド |
 | --- | --- |
-| サーバー | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
+| サーバー | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests`、`server.dev_servers` |
 | 通知 | `notification.show` |
 | クライアント | `client.window_title.set`、`client.window_title.clear` |
 | セッション | `session.snapshot` |
@@ -100,6 +100,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
 | タブ | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.move`、`tab.close` |
 | ペイン | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
+| プロセス | `process.kill` |
 | ポップアップ | `popup.close` |
 | レイアウト | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
 | エージェント | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start` |
@@ -300,6 +301,16 @@ Worktree メソッドは Git チェックアウトを Herdr ワークスペー�
 worktree コマンドはライフサイクルイベントも発行します。`worktree.create` は `workspace.created`、`tab.created`、`pane.created`、`worktree.created` を発行します。`worktree.open` は `worktree.opened` を発行し、新しい Herdr ワークスペースを開いた場合はワークスペース/タブ/ペインの作成イベントも発行します。`worktree.remove` は `worktree.removed` を発行し、リンクされたワークスペースがまだ開いている場合は `workspace.closed` も発行します。
 
 リンクされた worktree ワークスペースが開いている親ワークスペースを `workspace.close` で閉じるには、params に `"close_group": true` が必要です。明示的なグループクローズ指定がない場合は `workspace_group_close_required` を返します。明示的なグループクローズは、閉じた各ワークスペースについて `workspace.closed` イベントを 1 件ずつ発行します。
+
+`server.dev_servers` は、ペインのプロセスツリー内のプロセスが所有する TCP リスナーを列挙します — dev servers ウィンドウの背後にあるのと同じデータです。パラメータはありません。レスポンスは `type: "dev_server_list"` で、`servers` 配列を持ちます。各エントリは `pid`、`name`、`address`/`port` のペアからなる `listeners`、および任意の `command`、`uptime_seconds`、`pane_id`、`workspace_id`、`workspace_name`、`pane_title`、`cwd` を報告します。
+
+```json
+{"id":"req_dev_servers","method":"server.dev_servers","params":{}}
+{"id":"req_kill","method":"process.kill","params":{"pid":4242}}
+{"id":"req_kill_force","method":"process.kill","params":{"pid":4242,"force":true}}
+```
+
+`process.kill` は、ペインのプロセスツリー内にある間だけ pid を終了させます。スコープはリクエストごとに再計算され、ペインのツリー外の pid はシグナルを送る前に `process_out_of_scope` で拒否されるため、このメソッドで任意のプロセスを終了させることはできません。`force` のデフォルトは `false` で、Unix では SIGTERM を送ります。`true` は SIGKILL を送り、Windows では常に強制終了です。レスポンスは `type: "ok"` で、シグナル送信に失敗した場合は `terminate_failed` を返します。
 
 ## エージェントビューのクエリ
 
