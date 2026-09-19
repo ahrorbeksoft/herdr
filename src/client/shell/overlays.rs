@@ -19,6 +19,7 @@ pub(crate) struct OverlayRender {
     pub(crate) dev_server_popup: Rect,
     pub(crate) dev_server_search: Rect,
     pub(crate) dev_server_rows: Vec<(Rect, usize)>,
+    pub(crate) dev_server_url_rows: Vec<(Rect, usize)>,
     pub(crate) help_popup: Rect,
     pub(crate) help_scrollbar: Rect,
     pub(crate) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,

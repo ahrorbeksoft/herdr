@@ -1658,6 +1658,12 @@ impl ClientShellState {
                 .iter()
                 .find(|(rect, _)| super::contains(*rect, point))
                 .copied();
+            let url_hit = self
+                .hits
+                .dev_server_url_rows
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+                .copied();
             match mouse.kind {
                 MouseEventKind::Moved => {
                     if let Some((_, flat)) = row_hit {
@@ -1697,6 +1703,8 @@ impl ClientShellState {
                             overlay.search_focused = true;
                         }
                         outcome.repaint = true;
+                    } else if let Some((_, flat)) = url_hit {
+                        self.dev_servers_open_url(flat, outcome);
                     } else if let Some((_, flat)) = row_hit {
                         self.dev_servers_pointer_row(flat, true, outcome);
                     } else if !super::contains(self.hits.dev_server_popup, point) {

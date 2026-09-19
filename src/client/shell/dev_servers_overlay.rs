@@ -69,6 +69,111 @@ fn dev_server_uptime(uptime_seconds: Option<u64>) -> String {
     }
 }
 
+/// `workspace · pane title` — the third column's content.
+fn dev_server_context(entry: &ClientDevServerEntry) -> String {
+    [entry.workspace_name.as_deref(), entry.pane_title.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// `pid … · up …` — the right-aligned block; a pending termination badge
+/// replaces the uptime.
+fn dev_server_meta(
+    entry: &ClientDevServerEntry,
+    terminating: Option<ClientDevServerTermination>,
+) -> String {
+    let badge = match terminating {
+        Some(ClientDevServerTermination::Sent) => Some("terminating…"),
+        Some(ClientDevServerTermination::StillRunning) => Some("still running — x force"),
+        None => None,
+    };
+    let mut meta = format!("pid {}", entry.pid);
+    if let Some(badge) = badge {
+        meta.push_str(&format!(" · {badge}"));
+    } else {
+        let uptime = dev_server_uptime(entry.uptime_seconds);
+        if !uptime.is_empty() {
+            meta.push_str(&format!(" · up {uptime}"));
+        }
+    }
+    meta
+}
+
+/// `+N` suffix shown after the URL when a process owns extra listeners.
+fn dev_server_listener_badge(entry: &ClientDevServerEntry) -> Option<String> {
+    (entry.listeners.len() > 1).then(|| format!("+{}", entry.listeners.len() - 1))
+}
+
+/// Entry-row table layout shared by the width pass and the renderer.
+const DEV_SERVER_INDENT: u16 = 3;
+const DEV_SERVER_GUTTER: u16 = 2;
+/// `http://…:65535` — the smallest URL cell that still reads as a link.
+const DEV_SERVER_URL_MIN: u16 = 14;
+
+/// Fixed table columns sized to the filtered rows. Narrow popups shrink
+/// context first, then process, then the URL column — which never goes
+/// below `http://…:port` viability.
+struct DevServerColumns {
+    url: u16,
+    process: u16,
+    context: u16,
+}
+
+fn dev_server_columns(
+    body_rows: &[DevServerRow<'_>],
+    overlay: &ClientDevServersOverlay,
+    body: Rect,
+) -> DevServerColumns {
+    let (mut url, mut process, mut context, mut meta) = (0u16, 0u16, 0u16, 0u16);
+    for row in body_rows {
+        let DevServerRow::Entry(_, entry) = row else {
+            continue;
+        };
+        let badge = dev_server_listener_badge(entry)
+            .map(|badge| display_width(&badge))
+            .unwrap_or(0);
+        let cell = entry
+            .url()
+            .map(|url| display_width(&url))
+            .unwrap_or(0)
+            .saturating_add(badge);
+        url = url.max(cell);
+        process = process.max(display_width(&entry.name));
+        context = context.max(display_width(&dev_server_context(entry)));
+        meta = meta.max(display_width(&dev_server_meta(
+            entry,
+            overlay
+                .terminating
+                .get(&(entry.endpoint_id.clone(), entry.pid))
+                .copied(),
+        )));
+    }
+    let budget = body.width.saturating_sub(
+        DEV_SERVER_INDENT
+            .saturating_add(DEV_SERVER_GUTTER.saturating_mul(3))
+            .saturating_add(meta),
+    );
+    let mut excess = url
+        .saturating_add(process)
+        .saturating_add(context)
+        .saturating_sub(budget);
+    for column in [&mut context, &mut process] {
+        let take = (*column).min(excess);
+        *column -= take;
+        excess -= take;
+    }
+    if excess > 0 {
+        url = url.saturating_sub(excess).max(url.min(DEV_SERVER_URL_MIN));
+    }
+    DevServerColumns {
+        url,
+        process,
+        context,
+    }
+}
+
 pub(super) fn render_dev_servers_overlay(
     b: &mut Buffer,
     overlay: &ClientDevServersOverlay,
@@ -179,7 +284,9 @@ pub(super) fn render_dev_servers_overlay(
                 .min(body_rows.len().saturating_sub(visible))
         })
         .unwrap_or(0);
+    let columns = dev_server_columns(&body_rows, overlay, body);
     let mut row_hits = Vec::new();
+    let mut url_hits = Vec::new();
     for (offset, row) in body_rows
         .iter()
         .enumerate()
@@ -220,7 +327,8 @@ pub(super) fn render_dev_servers_overlay(
                 let selected = Some(*flat) == selected_flat;
                 let terminating = overlay
                     .terminating
-                    .get(&(entry.endpoint_id.clone(), entry.pid));
+                    .get(&(entry.endpoint_id.clone(), entry.pid))
+                    .copied();
                 let style = if selected {
                     base.fg(contrast(p))
                         .bg(p.accent)
@@ -229,42 +337,89 @@ pub(super) fn render_dev_servers_overlay(
                     base.fg(p.text)
                 };
                 b.set_style(rect, style);
-                let listeners = entry
-                    .listeners
-                    .iter()
-                    .map(|listener| format!("{}:{}", listener.address, listener.port))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let context = [entry.workspace_name.as_deref(), entry.pane_title.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                let uptime = dev_server_uptime(entry.uptime_seconds);
-                let mut label = format!("   {listeners} · {} (pid {})", entry.name, entry.pid);
-                if !context.is_empty() {
-                    label.push_str(&format!(" · {context}"));
-                }
-                if !uptime.is_empty() {
-                    label.push_str(&format!(" · up {uptime}"));
-                }
-                put_text(b, rect.x, rect.y, rect.width, &label, style);
                 row_hits.push((rect, *flat));
-                let badge = match terminating {
-                    Some(ClientDevServerTermination::Sent) => Some("terminating…"),
-                    Some(ClientDevServerTermination::StillRunning) => {
-                        Some("still running — ↵ force")
-                    }
-                    None => None,
-                };
-                if let Some(badge) = badge {
-                    let badge_style = if selected {
-                        style
+                let dim = if selected { style } else { muted };
+                let right = rect.right();
+
+                // URL column: the +N badge shares the column but not the
+                // click target, which covers only the URL text.
+                let url_x = rect.x.saturating_add(DEV_SERVER_INDENT).min(right);
+                if let Some(url) = entry.url() {
+                    let badge = dev_server_listener_badge(entry);
+                    let badge_w = badge
+                        .as_deref()
+                        .map(display_width)
+                        .unwrap_or(0)
+                        .min(columns.url);
+                    let shown = crate::ui::truncate_end(
+                        &url,
+                        usize::from(columns.url.saturating_sub(badge_w)),
+                    );
+                    let url_style = if selected {
+                        style.add_modifier(Modifier::UNDERLINED)
                     } else {
-                        base.fg(p.yellow).add_modifier(Modifier::BOLD)
+                        base.fg(p.accent).add_modifier(Modifier::UNDERLINED)
                     };
-                    put_right_text(b, rect, rect.y, badge, badge_style);
+                    let drawn = display_width(&shown).min(right.saturating_sub(url_x));
+                    put_text(b, url_x, rect.y, drawn, &shown, url_style);
+                    url_hits.push((Rect::new(url_x, rect.y, drawn, 1), *flat));
+                    if let Some(badge) = badge.as_deref() {
+                        let badge_x = url_x.saturating_add(drawn).min(right);
+                        put_text(
+                            b,
+                            badge_x,
+                            rect.y,
+                            badge_w.min(right.saturating_sub(badge_x)),
+                            badge,
+                            dim,
+                        );
+                    }
                 }
+
+                // PROCESS and CONTEXT columns — fixed offsets keep the table
+                // aligned across rows with different URL lengths.
+                let process_x = url_x
+                    .saturating_add(columns.url)
+                    .saturating_add(DEV_SERVER_GUTTER)
+                    .min(right);
+                let name = crate::ui::truncate_end(&entry.name, usize::from(columns.process));
+                put_text(
+                    b,
+                    process_x,
+                    rect.y,
+                    columns.process.min(right.saturating_sub(process_x)),
+                    &name,
+                    style,
+                );
+                let context_x = process_x
+                    .saturating_add(columns.process)
+                    .saturating_add(DEV_SERVER_GUTTER)
+                    .min(right);
+                let context = crate::ui::truncate_end(
+                    &dev_server_context(entry),
+                    usize::from(columns.context),
+                );
+                put_text(
+                    b,
+                    context_x,
+                    rect.y,
+                    columns.context.min(right.saturating_sub(context_x)),
+                    &context,
+                    dim,
+                );
+
+                // Right block — pid + uptime, or the termination badge.
+                put_right_text(
+                    b,
+                    rect,
+                    rect.y,
+                    &dev_server_meta(entry, terminating),
+                    if terminating.is_some() && !selected {
+                        base.fg(p.yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        style
+                    },
+                );
             }
         }
     }
@@ -297,7 +452,7 @@ pub(super) fn render_dev_servers_overlay(
         if overlay.search_focused {
             " type to filter · select ↑↓ · apply enter · back esc"
         } else {
-            " select j/k · terminate enter · filter / · refresh r · close esc"
+            " click url to open · enter/d terminate · x force kill · / filter · esc close"
         },
         muted,
     );
@@ -308,6 +463,7 @@ pub(super) fn render_dev_servers_overlay(
         dev_server_popup: q,
         dev_server_search: search,
         dev_server_rows: row_hits,
+        dev_server_url_rows: url_hits,
         cursor,
         ..OverlayRender::default()
     })

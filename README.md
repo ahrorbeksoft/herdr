@@ -76,7 +76,7 @@ backend = "cow"             # default: "git"
 
 the `menu` button gains a `dev servers` item that lists every tcp listener owned by a pane's process tree, across all connected machines grouped by endpoint.
 
-- each row shows the listening ports, pid, process name, the workspace/pane it belongs to, and its working directory.
+- each row leads with a clickable `http://host:port` url (click to open in the browser), then the process name, the workspace/pane it belongs to, pid, and uptime; extra listeners collapse into a `+N` badge.
 - `enter`/`d` sends sigterm; if the process survives the refresh, the row escalates to a force kill (`x`, sigkill). kills are scope-checked server-side — only pids inside a pane's process tree can be terminated.
 - endpoints running an older herdr without the `server.dev_servers` method show an "update required" section instead of failing the whole view.
 - also available to agents and scripts over the socket api: `server.dev_servers` and `process.kill`.

@@ -293,9 +293,10 @@ impl ClientShellState {
     }
 
     /// Terminate the highlighted server: graceful first, `force` only once a
-    /// refresh proved the pid still listens. Requests go to the endpoint that
-    /// owns the row, which is not necessarily the active one.
-    pub(super) fn dev_servers_terminate_selected(&mut self, outcome: &mut ClientShellInput) {
+    /// refresh proved the pid still listens — or immediately when the caller
+    /// asked for it. Requests go to the endpoint that owns the row, which is
+    /// not necessarily the active one.
+    fn dev_servers_kill_selected(&mut self, force: bool, outcome: &mut ClientShellInput) {
         let Some(ClientShellOverlay::DevServers(overlay)) = self.overlay.as_ref() else {
             return;
         };
@@ -308,16 +309,21 @@ impl ClientShellState {
         let endpoint_id = entry.endpoint_id.clone();
         let pid = entry.pid;
         let key = (endpoint_id.clone(), pid);
-        match overlay.terminating.get(&key) {
-            // A kill is already in flight; a second activation is a no-op.
-            Some(ClientDevServerTermination::Sent) => return,
-            Some(ClientDevServerTermination::StillRunning) => {}
-            None => {}
+        // A graceful kill is already in flight; only an explicit force
+        // repeats the request while it is.
+        if !force
+            && matches!(
+                overlay.terminating.get(&key),
+                Some(ClientDevServerTermination::Sent)
+            )
+        {
+            return;
         }
-        let force = matches!(
-            overlay.terminating.get(&key),
-            Some(ClientDevServerTermination::StillRunning)
-        );
+        let force = force
+            || matches!(
+                overlay.terminating.get(&key),
+                Some(ClientDevServerTermination::StillRunning)
+            );
         let sent = self.push_endpoint_method_for(
             &endpoint_id,
             crate::api::schema::Method::ProcessKill(crate::api::schema::ProcessKillParams {
@@ -341,6 +347,34 @@ impl ClientShellState {
                 overlay.error = unavailable;
             }
         }
+        outcome.repaint = true;
+    }
+
+    pub(super) fn dev_servers_terminate_selected(&mut self, outcome: &mut ClientShellInput) {
+        self.dev_servers_kill_selected(false, outcome);
+    }
+
+    /// `x` skips the graceful step — even while a graceful kill is still in
+    /// flight the process gets a force kill.
+    pub(super) fn dev_servers_force_kill_selected(&mut self, outcome: &mut ClientShellInput) {
+        self.dev_servers_kill_selected(true, outcome);
+    }
+
+    /// Clicking a row's URL opens it in the browser; the rest of the row
+    /// stays a normal selection click.
+    pub(super) fn dev_servers_open_url(&mut self, flat: usize, outcome: &mut ClientShellInput) {
+        let Some(ClientShellOverlay::DevServers(overlay)) = self.overlay.as_ref() else {
+            return;
+        };
+        let Some(url) = overlay
+            .filtered_rows()
+            .get(flat)
+            .and_then(|(section, entry)| overlay.entry_at(*section, *entry))
+            .and_then(ClientDevServerEntry::url)
+        else {
+            return;
+        };
+        outcome.actions.push(ClientShellAction::OpenSafeWebUrl(url));
         outcome.repaint = true;
     }
 
@@ -441,6 +475,12 @@ impl ClientShellState {
             KeyCode::Char('r') if modifiers.is_empty() => {
                 self.refresh_dev_servers(outcome);
                 outcome.repaint = true;
+            }
+            KeyCode::Char('d') if modifiers.is_empty() => {
+                self.dev_servers_terminate_selected(outcome);
+            }
+            KeyCode::Char('x') if modifiers.is_empty() => {
+                self.dev_servers_force_kill_selected(outcome);
             }
             _ => {}
         }

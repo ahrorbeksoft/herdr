@@ -126,6 +126,9 @@ pub(super) struct ShellHitMap {
     pub(super) dev_server_popup: Rect,
     pub(super) dev_server_search: Rect,
     pub(super) dev_server_rows: Vec<(Rect, usize)>,
+    /// `(Rect, flat row)` spans covering just each row's URL — a click opens
+    /// the link instead of selecting the row.
+    pub(super) dev_server_url_rows: Vec<(Rect, usize)>,
     pub(super) help_popup: Rect,
     pub(super) help_scrollbar: Rect,
     pub(super) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -551,6 +554,35 @@ pub(super) struct ClientWorktreeRemoveOverlay {
     pub(super) force_confirmation: bool,
 }
 
+/// `*`/`0.0.0.0`/`::`/empty binds listen on every interface; the host a
+/// browser can actually reach them at is localhost.
+fn dev_server_wildcard_address(address: &str) -> bool {
+    matches!(address.trim(), "" | "*" | "0.0.0.0" | "::" | "[::]")
+}
+
+fn dev_server_loopback_address(address: &str) -> bool {
+    let trimmed = address.trim();
+    let bare = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    bare == "localhost" || bare == "::1" || bare.starts_with("127.")
+}
+
+/// Host usable inside `http://host:port`: wildcard binds become `localhost`,
+/// IPv6 literals keep (or gain) brackets, everything else stays literal.
+fn dev_server_url_host(address: &str) -> String {
+    let trimmed = address.trim();
+    if dev_server_wildcard_address(trimmed) {
+        return "localhost".to_owned();
+    }
+    if trimmed.contains(':') && !trimmed.starts_with('[') {
+        format!("[{trimmed}]")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ClientDevServerEntry {
     pub(super) endpoint_id: ClientEndpointId,
@@ -586,20 +618,51 @@ impl ClientDevServerEntry {
         }
     }
 
+    /// The listener the row's link points at: wildcard and other externally
+    /// reachable binds beat loopback-only ones, then the lowest port wins.
+    pub(super) fn primary_listener(&self) -> Option<&crate::api::schema::DevServerListener> {
+        self.listeners.iter().min_by_key(|listener| {
+            (
+                dev_server_loopback_address(&listener.address),
+                listener.port,
+            )
+        })
+    }
+
+    /// `http://host:port` for the primary listener — the row's link target.
+    pub(super) fn url(&self) -> Option<String> {
+        let listener = self.primary_listener()?;
+        Some(format!(
+            "http://{}:{}",
+            dev_server_url_host(&listener.address),
+            listener.port
+        ))
+    }
+
     pub(super) fn matches_query(&self, query: &str) -> bool {
         let query = query.trim().to_lowercase();
         if query.is_empty() {
             return true;
         }
-        let ports = self
+        // Every listener contributes its raw `address:port` and the composed
+        // URL so both `58085` and `localhost:5173` find their row.
+        let listeners = self
             .listeners
             .iter()
-            .map(|listener| format!("{}:{}", listener.address, listener.port))
+            .map(|listener| {
+                format!(
+                    "{}:{} http://{}:{}",
+                    listener.address,
+                    listener.port,
+                    dev_server_url_host(&listener.address),
+                    listener.port
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ");
         format!(
             "{} {} {} {} {} {} {} {} {}",
-            ports,
+            listeners,
             self.pid,
             self.name,
             self.command.as_deref().unwrap_or_default(),
@@ -751,9 +814,16 @@ impl ClientDevServersOverlay {
     pub(super) fn set_ready(
         &mut self,
         endpoint_id: &ClientEndpointId,
-        entries: Vec<ClientDevServerEntry>,
+        mut entries: Vec<ClientDevServerEntry>,
     ) {
         if let Some(section) = self.section_mut(endpoint_id) {
+            // Rows display by the port their link opens.
+            entries.sort_by_key(|entry| {
+                entry
+                    .primary_listener()
+                    .map(|listener| listener.port)
+                    .unwrap_or(u16::MAX)
+            });
             section.state = ClientDevServerSectionState::Ready(entries);
         }
     }

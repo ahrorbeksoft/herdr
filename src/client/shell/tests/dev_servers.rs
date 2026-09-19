@@ -186,7 +186,8 @@ fn dev_servers_result_populates_rows_and_selection_survives_refresh() {
         Some((ClientEndpointId::Local, 11))
     );
 
-    // A refresh that reorders the list keeps the selected pid highlighted.
+    // A refresh that reorders the list keeps the selected pid highlighted;
+    // rows display sorted by primary port regardless of server order.
     let actions = open(&mut state);
     state.handle_endpoint_result(
         "boot-1",
@@ -200,7 +201,7 @@ fn dev_servers_result_populates_rows_and_selection_survives_refresh() {
         overlay(&state).selected,
         Some((ClientEndpointId::Local, 11))
     );
-    assert_eq!(overlay(&state).selected_flat_index(), Some(0));
+    assert_eq!(overlay(&state).selected_flat_index(), Some(1));
 
     // When the selected process exits, selection falls back to the first row.
     let actions = open(&mut state);
@@ -238,6 +239,132 @@ fn dev_servers_query_matches_ports_names_commands_and_context() {
         );
     }
     assert!(entry.matches_query(""));
+}
+
+#[test]
+fn dev_servers_primary_listener_prefers_wildcard_then_lowest_port() {
+    // A wildcard/externally reachable bind beats a lower loopback-only port.
+    let mut raw = server_entry(1, "vite", 0);
+    raw.listeners = vec![
+        DevServerListener {
+            address: "127.0.0.1".into(),
+            port: 3000,
+        },
+        DevServerListener {
+            address: "*".into(),
+            port: 5173,
+        },
+    ];
+    let entry = ClientDevServerEntry::from_server(ClientEndpointId::Local, raw);
+    assert_eq!(
+        entry.primary_listener().map(|listener| listener.port),
+        Some(5173)
+    );
+    assert_eq!(entry.url().as_deref(), Some("http://localhost:5173"));
+
+    // Within one reachability class the lowest port wins.
+    let mut raw = server_entry(1, "node", 0);
+    raw.listeners = vec![
+        DevServerListener {
+            address: "0.0.0.0".into(),
+            port: 8080,
+        },
+        DevServerListener {
+            address: "*".into(),
+            port: 3000,
+        },
+    ];
+    let entry = ClientDevServerEntry::from_server(ClientEndpointId::Local, raw);
+    assert_eq!(entry.url().as_deref(), Some("http://localhost:3000"));
+
+    // Loopback-only processes pick their lowest loopback port.
+    let mut raw = server_entry(1, "node", 0);
+    raw.listeners = vec![
+        DevServerListener {
+            address: "127.0.0.1".into(),
+            port: 9000,
+        },
+        DevServerListener {
+            address: "::1".into(),
+            port: 4000,
+        },
+    ];
+    let entry = ClientDevServerEntry::from_server(ClientEndpointId::Local, raw);
+    assert_eq!(entry.url().as_deref(), Some("http://[::1]:4000"));
+}
+
+#[test]
+fn dev_servers_url_host_formats_each_bind_style() {
+    for (address, url) in [
+        ("*", "http://localhost:3000"),
+        ("0.0.0.0", "http://localhost:3000"),
+        ("::", "http://localhost:3000"),
+        ("[::]", "http://localhost:3000"),
+        ("127.0.0.1", "http://127.0.0.1:3000"),
+        ("::1", "http://[::1]:3000"),
+        ("[::1]", "http://[::1]:3000"),
+        ("192.168.1.20", "http://192.168.1.20:3000"),
+    ] {
+        let mut raw = server_entry(1, "node", 3000);
+        raw.listeners = vec![DevServerListener {
+            address: address.into(),
+            port: 3000,
+        }];
+        let entry = ClientDevServerEntry::from_server(ClientEndpointId::Local, raw);
+        assert_eq!(entry.url().as_deref(), Some(url), "address {address:?}");
+    }
+}
+
+#[test]
+fn dev_servers_query_matches_secondary_listener_port_and_url() {
+    let mut raw = server_entry(42, "vite", 5173);
+    raw.listeners = vec![
+        DevServerListener {
+            address: "*".into(),
+            port: 5173,
+        },
+        DevServerListener {
+            address: "127.0.0.1".into(),
+            port: 58085,
+        },
+    ];
+    let entry = ClientDevServerEntry::from_server(ClientEndpointId::Local, raw);
+    // The hidden secondary listener still filters in.
+    assert!(entry.matches_query("58085"));
+    assert!(entry.matches_query("127.0.0.1:58085"));
+    // Composed URLs match too — the wildcard bind reads as localhost.
+    assert!(entry.matches_query("localhost:5173"));
+    assert!(entry.matches_query("http://127.0.0.1:58085"));
+    assert!(!entry.matches_query("9999"));
+}
+
+#[test]
+fn dev_servers_d_terminates_and_x_escalates_to_force() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let actions = open(&mut state);
+    state.handle_endpoint_result(
+        "boot-1",
+        request_id(&actions),
+        Ok(list_result(vec![server_entry(42, "node", 3000)])),
+    );
+
+    // Leave the filter; `d` sends a graceful kill to the owning endpoint.
+    state.handle_input_bytes(b"\r");
+    let outcome = state.handle_input_bytes(b"d");
+    let kill = endpoint_request(&outcome.actions, &ClientEndpointId::Local);
+    assert!(matches!(
+        &kill.method,
+        Method::ProcessKill(params) if params.pid == 42 && !params.force
+    ));
+
+    // `x` escalates to a force kill even while the graceful one is in flight.
+    let outcome = state.handle_input_bytes(b"x");
+    let force = endpoint_request(&outcome.actions, &ClientEndpointId::Local);
+    assert!(matches!(
+        &force.method,
+        Method::ProcessKill(params) if params.pid == 42 && params.force
+    ));
 }
 
 #[test]
@@ -518,6 +645,171 @@ fn dev_servers_overlay_renders_sections_and_row_hits() {
     state.set_pane_surface(surface());
     state.compose(106, 40).unwrap();
     assert_eq!(state.hits.dev_server_rows.len(), 2);
+    assert_eq!(state.hits.dev_server_url_rows.len(), 2);
     assert!(!state.hits.dev_server_search.is_empty());
     assert!(!state.hits.dev_server_popup.is_empty());
+}
+
+#[test]
+fn dev_servers_row_shows_url_badge_name_and_meta() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let actions = open(&mut state);
+    let mut vite = server_entry(42, "vite", 5173);
+    vite.listeners = vec![
+        DevServerListener {
+            address: "*".into(),
+            port: 5173,
+        },
+        DevServerListener {
+            address: "127.0.0.1".into(),
+            port: 58085,
+        },
+    ];
+    state.handle_endpoint_result("boot-1", request_id(&actions), Ok(list_result(vec![vite])));
+    state.set_pane_surface(surface());
+    let frame = state.compose(106, 40).unwrap();
+    let rows = frame_rows(&frame);
+    let row = rows
+        .iter()
+        .find(|row| row.contains("http://localhost:5173"))
+        .expect("dev server row")
+        .clone();
+    // The extra listener collapses into +N; raw bind addresses stay hidden.
+    assert!(row.contains("http://localhost:5173+1"), "row: {row}");
+    // Process and context are separate columns now — padded, not ` · ` joined.
+    assert!(row.contains("vite"), "row: {row}");
+    assert!(row.contains("client-shell · web"), "row: {row}");
+    assert!(!row.contains("vite · client-shell"), "row: {row}");
+    assert!(row.contains("pid 42 · up 1m 30s"), "row: {row}");
+    assert!(!row.contains("(pid"), "row: {row}");
+    assert!(!row.contains("127.0.0.1:58085"), "row: {row}");
+    // The URL span is a click target of its own inside the row.
+    assert_eq!(state.hits.dev_server_url_rows.len(), 1);
+    let (rect, flat) = state.hits.dev_server_url_rows[0];
+    assert_eq!(flat, 0);
+    assert_eq!(rect.width, "http://localhost:5173".len() as u16);
+}
+
+#[test]
+fn dev_servers_columns_align_across_rows() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let actions = open(&mut state);
+    let mut vite = server_entry(42, "vite", 5173);
+    vite.listeners = vec![
+        DevServerListener {
+            address: "*".into(),
+            port: 5173,
+        },
+        DevServerListener {
+            address: "127.0.0.1".into(),
+            port: 58085,
+        },
+    ];
+    let node = server_entry(10, "node", 3000);
+    state.handle_endpoint_result(
+        "boot-1",
+        request_id(&actions),
+        Ok(list_result(vec![vite, node])),
+    );
+    state.set_pane_surface(surface());
+    let frame = state.compose(106, 40).unwrap();
+    let rows = frame_rows(&frame);
+    let vite_row = rows
+        .iter()
+        .find(|row| row.contains("http://localhost:5173"))
+        .expect("vite row");
+    let node_row = rows
+        .iter()
+        .find(|row| row.contains("http://127.0.0.1:3000"))
+        .expect("node row");
+    // Different URL/badge lengths still put every column at the same offset.
+    // Compare character columns — row prefixes contain multi-byte `─`/`│`.
+    let column_of =
+        |row: &str, needle: &str| row.find(needle).map(|byte| row[..byte].chars().count());
+    assert_eq!(
+        column_of(vite_row, "vite"),
+        column_of(node_row, "node"),
+        "vite: {vite_row:?}\nnode: {node_row:?}"
+    );
+    assert_eq!(
+        column_of(vite_row, "client-shell"),
+        column_of(node_row, "client-shell")
+    );
+    assert_eq!(column_of(vite_row, "pid 42"), column_of(node_row, "pid 10"));
+}
+
+#[test]
+fn dev_servers_columns_truncate_when_narrow() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let actions = open(&mut state);
+    let mut vite = server_entry(42, "vite", 5173);
+    vite.listeners = vec![
+        DevServerListener {
+            address: "*".into(),
+            port: 5173,
+        },
+        DevServerListener {
+            address: "127.0.0.1".into(),
+            port: 58085,
+        },
+    ];
+    let node = server_entry(10, "node", 3000);
+    state.handle_endpoint_result(
+        "boot-1",
+        request_id(&actions),
+        Ok(list_result(vec![vite, node])),
+    );
+    state.set_pane_surface(surface());
+    let frame = state.compose(48, 40).unwrap();
+    let rows = frame_rows(&frame);
+    // Context, then process, shrink to nothing; the URL cell keeps a viable
+    // `http://…` truncation and the right meta stays put.
+    let vite_row = rows
+        .iter()
+        .find(|row| row.contains("pid 42"))
+        .expect("vite row");
+    assert!(vite_row.contains("http://local…"), "row: {vite_row}");
+    assert!(vite_row.contains("pid 42 · up 1m 30s"), "row: {vite_row}");
+    assert!(!vite_row.contains("client-shell"), "row: {vite_row}");
+    let node_row = rows
+        .iter()
+        .find(|row| row.contains("pid 10"))
+        .expect("node row");
+    assert!(node_row.contains("…"), "row: {node_row}");
+}
+
+#[test]
+fn dev_servers_url_click_emits_open_url_action() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let actions = open(&mut state);
+    let mut vite = server_entry(42, "vite", 5173);
+    vite.listeners = vec![DevServerListener {
+        address: "*".into(),
+        port: 5173,
+    }];
+    state.handle_endpoint_result("boot-1", request_id(&actions), Ok(list_result(vec![vite])));
+    state.set_pane_surface(surface());
+    state.compose(106, 40).unwrap();
+    let (rect, _) = state.hits.dev_server_url_rows[0];
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + 2,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut outcome,
+    );
+    assert!(matches!(
+        outcome.actions.as_slice(),
+        [ClientShellAction::OpenSafeWebUrl(url)] if url == "http://localhost:5173"
+    ));
+    // The click opened the link instead of selecting or terminating the row.
+    assert!(overlay(&state).selected.is_none());
+    assert!(endpoint_requests(&outcome.actions, &ClientEndpointId::Local).is_empty());
 }
