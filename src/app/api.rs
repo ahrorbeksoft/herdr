@@ -1541,6 +1541,9 @@ mod tests {
 
     #[tokio::test]
     async fn server_reload_agent_manifests_resets_detection_runtimes() {
+        // reload_manifests reads env-scoped manifest dirs and rewrites the
+        // global cache; hold the shared env lock for the whole test.
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
@@ -1582,6 +1585,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_agent_manifests_reports_status_without_resetting_runtimes() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),

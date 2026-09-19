@@ -1162,8 +1162,7 @@ mod tests {
     use std::{cell::RefCell, collections::HashMap};
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::config::test_config_env_lock()
     }
 
     #[test]

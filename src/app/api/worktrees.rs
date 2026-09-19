@@ -2628,7 +2628,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn api_worktree_list_cow_maps_pasture_to_source_repo() {
-        let _lock = crate::worktree::COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         let stub_dir = unique_temp_path("api-worktree-list-cow-stub");
         std::fs::create_dir_all(&stub_dir).unwrap();
         let repo = create_committed_repo("api-worktree-list-cow-repo");
@@ -2684,7 +2684,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn api_worktree_source_cow_rejects_pasture_checkout() {
-        let _lock = crate::worktree::COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         let stub_dir = unique_temp_path("api-worktree-source-cow-stub");
         std::fs::create_dir_all(&stub_dir).unwrap();
         let repo = create_committed_repo("api-worktree-source-cow-repo");

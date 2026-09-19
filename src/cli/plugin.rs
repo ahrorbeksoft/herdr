@@ -1842,6 +1842,9 @@ mod tests {
             plugin_config_dir_command(std::slice::from_ref(&plugin_id)).unwrap(),
             0
         );
+        // The cli print macros switch SIGPIPE to SIG_DFL; restore the ignored
+        // disposition so later socket-write tests are not killed by the signal.
+        crate::platform::end_cli_output();
 
         assert_eq!(
             std::fs::read_to_string(config_dir.join(".env")).unwrap(),

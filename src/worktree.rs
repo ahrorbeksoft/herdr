@@ -769,12 +769,8 @@ pub(crate) fn build_cow_remove_command(path: &Path, force: bool) -> WorktreeComm
     }
 }
 
-/// Serializes tests that mutate the cow-related process env, which is
-/// shared by every test thread in the crate.
-#[cfg(test)]
-pub(crate) static COW_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Restores mutated env vars on drop; pair with [`COW_ENV_LOCK`].
+/// Restores mutated env vars on drop; pair with
+/// [`crate::config::test_config_env_lock`].
 #[cfg(test)]
 pub(crate) struct CowEnvGuard {
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -1365,7 +1361,7 @@ prunable stale
 
     #[test]
     fn cow_pastures_directory_prefers_env_override() {
-        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         let dir = unique_temp_path("cow-dir-override");
         let _env = CowEnvGuard::set(&[("HERDR_COW_DIR", Some(&dir))]);
         assert_eq!(cow_pastures_directory(), dir);
@@ -1373,7 +1369,7 @@ prunable stale
 
     #[test]
     fn cow_program_prefers_env_override() {
-        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         let _env = CowEnvGuard::set(&[("HERDR_COW_BIN", Some(Path::new("/custom/cow")))]);
         assert_eq!(cow_program(), Path::new("/custom/cow"));
     }
@@ -1381,7 +1377,7 @@ prunable stale
     #[cfg(unix)]
     #[test]
     fn cow_program_searches_path_dirs() {
-        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         let dir = unique_temp_path("cow-program-path");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("cow"), "").unwrap();
@@ -1399,7 +1395,7 @@ prunable stale
     #[cfg(unix)]
     #[test]
     fn cow_list_parses_pasture_entries() {
-        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         let dir = unique_temp_path("cow-list-entries");
         std::fs::create_dir_all(&dir).unwrap();
         let pasture = dir.join("pastures/repo/feat");
@@ -1444,7 +1440,7 @@ prunable stale
     #[cfg(unix)]
     #[test]
     fn cow_pasture_source_maps_listed_pasture_to_source() {
-        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         let dir = unique_temp_path("cow-pasture-source");
         let pasture = create_committed_repo("cow-pasture-source-pasture");
         let source = create_committed_repo("cow-pasture-source-src");
@@ -1472,7 +1468,7 @@ prunable stale
     #[cfg(unix)]
     #[test]
     fn list_worktrees_cow_includes_source_then_pastures() {
-        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         let dir = unique_temp_path("cow-list-worktrees");
         let repo = create_committed_repo("cow-list-worktrees-repo");
         let pasture = dir.join("pastures/repo/feat");
@@ -1507,7 +1503,7 @@ prunable stale
     #[cfg(unix)]
     #[test]
     fn run_worktree_add_cow_returns_reported_path() {
-        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         let dir = unique_temp_path("cow-add");
         let repo = create_committed_repo("cow-add-repo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1540,7 +1536,7 @@ prunable stale
     #[cfg(unix)]
     #[test]
     fn cow_remove_command_prefers_listed_pasture_name() {
-        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         let dir = unique_temp_path("cow-remove-listed");
         let pasture = dir.join("pastures/repo/feat");
         std::fs::create_dir_all(&pasture).unwrap();
@@ -1565,7 +1561,7 @@ prunable stale
 
     #[test]
     fn cow_remove_command_falls_back_to_path_tail() {
-        let _lock = COW_ENV_LOCK.lock().unwrap();
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
         // No listed pasture matches: the name is derived from the
         // <repo>/<name> tail of the checkout path. Works whether or not a
         // real cow binary is installed, since this path cannot be listed.
