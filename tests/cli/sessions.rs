@@ -367,6 +367,33 @@ fn integration_status_rejects_unknown_flags() {
 }
 
 #[test]
+fn integration_install_detect_only_agent_explains_no_install() {
+    let base = unique_test_dir();
+    let home_dir = base.join("home");
+    fs::create_dir_all(&home_dir).unwrap();
+    let runtime_dir = base.join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    register_runtime_dir(&runtime_dir);
+    let missing_socket = runtime_dir.join("missing.sock");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["integration", "install", "fx"])
+        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("HOME", &home_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fx uses built-in screen detection"),
+        "expected detect-only explanation, got: {stderr}"
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn status_commands_report_client_and_server_versions() {
     let base = unique_test_dir();
     let config_home = base.join("config");

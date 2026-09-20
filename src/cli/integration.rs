@@ -180,7 +180,13 @@ fn parse_integration_target(
         }
         "grok" => IntegrationCommandTarget::Builtin(IntegrationTarget::Grok),
         _ => {
-            eprintln!("unknown integration target: {target}");
+            if crate::detect::identify_agent(target).is_some() {
+                eprintln!(
+                    "{target} uses built-in screen detection; there is no integration to install"
+                );
+            } else {
+                eprintln!("unknown integration target: {target}");
+            }
             eprintln!(
                 "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, letta, cursor, mastracode, antigravity-cli, grok"
             );
