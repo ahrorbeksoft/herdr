@@ -2,6 +2,8 @@
 
 pub const BASE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+const FORK_VERSION_SUFFIX: &str = "mod";
+
 pub fn channel() -> &'static str {
     non_empty(option_env!("HERDR_BUILD_CHANNEL")).unwrap_or("stable")
 }
@@ -11,13 +13,14 @@ pub fn build_id() -> Option<&'static str> {
 }
 
 pub fn version() -> String {
-    match channel() {
+    let base = match channel() {
         "stable" => BASE_VERSION.to_string(),
         channel => match build_id() {
             Some(build_id) => format!("{BASE_VERSION}-{channel}.{build_id}"),
             None => format!("{BASE_VERSION}-{channel}"),
         },
-    }
+    };
+    format!("{base}-{FORK_VERSION_SUFFIX}")
 }
 
 pub fn is_preview() -> bool {
